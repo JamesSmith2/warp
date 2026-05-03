@@ -63,6 +63,8 @@ impl HeaderToolbarItemKind {
             Self::TabsPanel => {
                 FeatureFlag::VerticalTabs.is_enabled()
                     && *TabSettings::as_ref(app).use_vertical_tabs
+                    && !(FeatureFlag::WindowWorkspaceGroups.is_enabled()
+                        && *TabSettings::as_ref(app).use_window_workspace_groups)
             }
             Self::ToolsPanel => true,
             Self::AgentManagement => {

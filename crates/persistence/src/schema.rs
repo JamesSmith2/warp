@@ -360,6 +360,7 @@ diesel::table! {
         window_id -> Integer,
         custom_title -> Nullable<Text>,
         color -> Nullable<Text>,
+        workspace_group_id -> Nullable<Integer>,
     }
 }
 
@@ -447,6 +448,17 @@ diesel::table! {
         agent_management_filters -> Nullable<Text>,
         left_panel_open -> Nullable<Bool>,
         vertical_tabs_panel_open -> Nullable<Bool>,
+        active_workspace_group_index -> Nullable<Integer>,
+    }
+}
+
+diesel::table! {
+    workspace_groups (id) {
+        id -> Integer,
+        window_id -> Integer,
+        group_index -> Integer,
+        name -> Text,
+        active_tab_index -> Integer,
     }
 }
 
@@ -509,7 +521,9 @@ diesel::joinable!(pane_branches -> pane_nodes (pane_node_id));
 diesel::joinable!(pane_leaves -> pane_nodes (pane_node_id));
 diesel::joinable!(pane_nodes -> tabs (tab_id));
 diesel::joinable!(panels -> tabs (tab_id));
+diesel::joinable!(tabs -> workspace_groups (workspace_group_id));
 diesel::joinable!(tabs -> windows (window_id));
+diesel::joinable!(workspace_groups -> windows (window_id));
 diesel::joinable!(team_members -> teams (team_id));
 diesel::joinable!(team_settings -> teams (team_id));
 diesel::joinable!(workspace_language_server -> workspace_metadata (workspace_id));
@@ -523,6 +537,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     panels,
     tabs,
     windows,
+    workspace_groups,
 );
 diesel::allow_tables_to_appear_in_same_query!(code_pane_tabs, code_panes,);
 diesel::allow_tables_to_appear_in_same_query!(object_metadata, object_permissions,);

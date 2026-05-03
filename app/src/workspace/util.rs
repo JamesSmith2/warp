@@ -128,6 +128,7 @@ pub struct WorkspaceState {
     /// Whether the transcript details panel is open (WASM only, for conversation transcript viewing).
     pub is_transcript_details_panel_open: bool,
     tab_being_renamed: Option<usize>, // The index of the tab being renamed
+    workspace_group_being_renamed: Option<usize>,
     pane_being_renamed: Option<PaneViewLocator>,
 }
 
@@ -145,6 +146,7 @@ impl WorkspaceState {
             || self.is_theme_deletion_modal_open
             || self.is_changelog_modal_open
             || self.tab_being_renamed.is_some()
+            || self.workspace_group_being_renamed.is_some()
             || self.pane_being_renamed.is_some()
             || self.is_reward_modal_open
             || self.is_launch_config_save_modal_open
@@ -186,6 +188,7 @@ impl WorkspaceState {
         self.is_theme_deletion_modal_open = false;
         self.is_changelog_modal_open = false;
         self.tab_being_renamed = None;
+        self.workspace_group_being_renamed = None;
         self.pane_being_renamed = None;
         self.is_reward_modal_open = false;
         self.is_launch_config_save_modal_open = false;
@@ -229,6 +232,7 @@ impl WorkspaceState {
 
     pub fn set_tab_being_renamed(&mut self, index: usize) {
         self.tab_being_renamed = Some(index);
+        self.workspace_group_being_renamed = None;
         self.pane_being_renamed = None;
     }
 
@@ -238,6 +242,24 @@ impl WorkspaceState {
 
     pub fn tab_being_renamed(&self) -> Option<usize> {
         self.tab_being_renamed
+    }
+
+    pub fn is_workspace_group_being_renamed(&self) -> bool {
+        self.workspace_group_being_renamed.is_some()
+    }
+
+    pub fn set_workspace_group_being_renamed(&mut self, index: usize) {
+        self.workspace_group_being_renamed = Some(index);
+        self.tab_being_renamed = None;
+        self.pane_being_renamed = None;
+    }
+
+    pub fn clear_workspace_group_being_renamed(&mut self) {
+        self.workspace_group_being_renamed = None;
+    }
+
+    pub fn workspace_group_being_renamed(&self) -> Option<usize> {
+        self.workspace_group_being_renamed
     }
 
     pub fn is_pane_being_renamed(&self, pane: PaneViewLocator) -> bool {
@@ -251,6 +273,7 @@ impl WorkspaceState {
     pub fn set_pane_being_renamed(&mut self, pane: PaneViewLocator) {
         self.pane_being_renamed = Some(pane);
         self.tab_being_renamed = None;
+        self.workspace_group_being_renamed = None;
     }
 
     pub fn clear_pane_being_renamed(&mut self) {

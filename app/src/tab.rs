@@ -58,7 +58,10 @@ const TAB_INDICATOR_HEIGHT: f32 = 14.0;
 /// Exposed so binding-description overrides in `workspace/mod.rs` and context-
 /// menu builders here can share a single predicate.
 pub fn uses_vertical_tabs(ctx: &AppContext) -> bool {
-    FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs
+    FeatureFlag::VerticalTabs.is_enabled()
+        && *TabSettings::as_ref(ctx).use_vertical_tabs
+        && !(FeatureFlag::WindowWorkspaceGroups.is_enabled()
+            && *TabSettings::as_ref(ctx).use_window_workspace_groups)
 }
 
 const WARP_2_TAB_COLOR_OPACITY: Opacity = 25;

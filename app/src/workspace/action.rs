@@ -101,6 +101,24 @@ pub enum WorkspaceAction {
     ActivatePrevTab,
     ActivateNextTab,
     ActivateLastTab,
+    ActivateWorkspaceGroup(usize),
+    AddWorkspaceGroup,
+    CloseWorkspaceGroup(usize),
+    RenameWorkspaceGroup(usize),
+    SetWorkspaceGroupName {
+        index: usize,
+        name: String,
+    },
+    ToggleWorkspaceGroupContextMenu {
+        index: usize,
+        position: Vector2F,
+    },
+    StartWorkspaceGroupDrag(usize),
+    DragWorkspaceGroup {
+        index: usize,
+        position: RectF,
+    },
+    DropWorkspaceGroup,
     CyclePrevSession,
     CycleNextSession,
     MoveActiveTabLeft,
@@ -705,6 +723,10 @@ impl WorkspaceAction {
             | ActivatePrevTab
             | ActivateNextTab
             | ActivateLastTab
+            | ActivateWorkspaceGroup(_)
+            | AddWorkspaceGroup
+            | CloseWorkspaceGroup(_)
+            | SetWorkspaceGroupName { .. }
             | CyclePrevSession
             | CycleNextSession
             | MoveActiveTabLeft
@@ -928,6 +950,11 @@ impl WorkspaceAction {
             | TabConfigSidecarRemoveConfig { .. }
             | OpenSettingsFile
             | FixSettingsWithOz { .. }
+            | RenameWorkspaceGroup(_)
+            | ToggleWorkspaceGroupContextMenu { .. }
+            | StartWorkspaceGroupDrag(_)
+            | DragWorkspaceGroup { .. }
+            | DropWorkspaceGroup
             | OpenNetworkLogPane => false,
             #[cfg(debug_assertions)]
             ShowHoaOnboardingFlow => false,

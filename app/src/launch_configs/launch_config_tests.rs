@@ -23,6 +23,8 @@ fn single_tab_snapshot(root: PaneNodeSnapshot) -> AppState {
                 right_panel: None,
             }],
             active_tab_index: 0,
+            workspace_groups: vec![],
+            active_workspace_group_index: 0,
             bounds: None,
             quake_mode: false,
             universal_search_width: None,
@@ -47,6 +49,8 @@ fn multi_tab_snapshot(active_tab_index: usize, tabs: Vec<TabSnapshot>) -> AppSta
         windows: vec![WindowSnapshot {
             tabs,
             active_tab_index,
+            workspace_groups: vec![],
+            active_workspace_group_index: 0,
             bounds: None,
             quake_mode: false,
             universal_search_width: None,

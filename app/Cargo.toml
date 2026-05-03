@@ -616,6 +616,7 @@ default = [
     "open_code_notifications",
     "cli_agent_rich_input",
     "vertical_tabs",
+    "window_workspace_groups",
     "tab_configs",
     "hoa_onboarding_flow",
     "hoa_remote_control",
@@ -793,6 +794,7 @@ ssh_drag_and_drop = []
 permanent_autosuggestion_hint = []
 cycle_next_command_suggestion = []
 multi_workspace = []
+window_workspace_groups = []
 ime_marked_text = []
 partial_next_command_suggestions = []
 drive_objects_as_context = []

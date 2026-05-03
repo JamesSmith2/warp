@@ -252,6 +252,70 @@ fn restored_workspace(
     workspace
 }
 
+fn restored_workspace_group_test_tab(title: &str) -> crate::app_state::TabSnapshot {
+    crate::app_state::TabSnapshot {
+        custom_title: Some(title.to_string()),
+        root: crate::app_state::PaneNodeSnapshot::Leaf(crate::app_state::LeafSnapshot {
+            is_focused: true,
+            custom_vertical_tabs_title: None,
+            contents: crate::app_state::LeafContents::Terminal(
+                crate::app_state::TerminalPaneSnapshot {
+                    uuid: title.as_bytes().to_vec(),
+                    cwd: Some("/tmp".to_string()),
+                    shell_launch_data: Some(crate::terminal::ShellLaunchData::Executable {
+                        executable_path: std::path::PathBuf::from("/bin/zsh"),
+                        shell_type: crate::terminal::shell::ShellType::Zsh,
+                    }),
+                    is_active: true,
+                    is_read_only: false,
+                    input_config: None,
+                    llm_model_override: None,
+                    active_profile_id: None,
+                    conversation_ids_to_restore: vec![],
+                    active_conversation_id: None,
+                },
+            ),
+        }),
+        default_directory_color: None,
+        selected_color: SelectedTabColor::default(),
+        left_panel: None,
+        right_panel: None,
+    }
+}
+
+fn restored_workspace_groups_window_snapshot(
+    groups: Vec<crate::app_state::WorkspaceGroupSnapshot>,
+    active_workspace_group_index: usize,
+) -> crate::app_state::WindowSnapshot {
+    let tabs = groups
+        .get(active_workspace_group_index)
+        .map(|group| group.tabs.clone())
+        .unwrap_or_default();
+    let active_tab_index = groups
+        .get(active_workspace_group_index)
+        .map(|group| group.active_tab_index)
+        .unwrap_or_default();
+
+    crate::app_state::WindowSnapshot {
+        tabs,
+        active_tab_index,
+        workspace_groups: groups,
+        active_workspace_group_index,
+        bounds: None,
+        fullscreen_state: Default::default(),
+        quake_mode: false,
+        universal_search_width: None,
+        warp_ai_width: None,
+        voltron_width: None,
+        warp_drive_index_width: None,
+        left_panel_open: false,
+        vertical_tabs_panel_open: false,
+        left_panel_width: None,
+        right_panel_width: None,
+        agent_management_filters: None,
+    }
+}
+
 fn transferred_tab_workspace(
     app: &mut App,
     vertical_tabs_panel_open: bool,
@@ -2467,6 +2531,276 @@ fn test_vertical_tabs_panel_auto_shows_when_setting_enabled() {
         });
         workspace.read(&app, |workspace, _| {
             assert!(!workspace.vertical_tabs_panel_open);
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_scope_visible_tabs() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.workspace_group_count(), 1);
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.tab_count(), 1);
+
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert_eq!(workspace.tab_count(), 1);
+
+            workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(0), ctx);
+
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.tab_count(), 1);
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_rename_trims_and_ignores_empty_names() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::RenameWorkspaceGroup(0), ctx);
+            assert!(workspace
+                .current_workspace_state
+                .is_workspace_group_being_renamed());
+
+            workspace
+                .workspace_group_rename_editor
+                .update(ctx, |editor, ctx| {
+                    editor.clear_buffer_and_reset_undo_stack(ctx);
+                    editor.insert_selected_text("  Backend  ", ctx);
+                });
+            workspace.handle_workspace_group_rename_editor_event(&Event::Enter, ctx);
+            assert_eq!(workspace.workspace_groups[0].name, "Backend");
+            assert!(!workspace
+                .current_workspace_state
+                .is_workspace_group_being_renamed());
+
+            workspace.handle_action(
+                &WorkspaceAction::SetWorkspaceGroupName {
+                    index: 0,
+                    name: "   ".to_string(),
+                },
+                ctx,
+            );
+            assert_eq!(workspace.workspace_groups[0].name, "Backend");
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_reorder_preserves_active_workspace_and_tabs() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::SetWorkspaceGroupName {
+                    index: 0,
+                    name: "One".to_string(),
+                },
+                ctx,
+            );
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            workspace.handle_action(
+                &WorkspaceAction::SetWorkspaceGroupName {
+                    index: 1,
+                    name: "Two".to_string(),
+                },
+                ctx,
+            );
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            workspace.handle_action(
+                &WorkspaceAction::SetWorkspaceGroupName {
+                    index: 2,
+                    name: "Three".to_string(),
+                },
+                ctx,
+            );
+            workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(1), ctx);
+
+            workspace.move_workspace_group(1, 0, ctx);
+
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.workspace_groups[0].name, "Two");
+            assert_eq!(workspace.workspace_groups[1].name, "One");
+            assert_eq!(workspace.workspace_groups[2].name, "Three");
+            assert_eq!(workspace.tab_count(), 1);
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_suppress_vertical_tabs_ui_without_changing_setting() {
+    let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_vertical_tabs.set_value(true, ctx));
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.vertical_tabs_panel_open = true;
+            workspace.handle_action(&WorkspaceAction::ToggleVerticalTabsPanel, ctx);
+
+            assert!(!workspace.vertical_tabs_panel_open);
+            assert!(*TabSettings::as_ref(ctx).use_vertical_tabs);
+            assert!(!HeaderToolbarItemKind::TabsPanel.is_available(ctx));
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_restore_inactive_group_tabs_and_active_tab() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = restored_workspace(
+            &mut app,
+            restored_workspace_groups_window_snapshot(
+                vec![
+                    crate::app_state::WorkspaceGroupSnapshot {
+                        name: "Backend".to_string(),
+                        tabs: vec![
+                            restored_workspace_group_test_tab("API"),
+                            restored_workspace_group_test_tab("Worker"),
+                        ],
+                        active_tab_index: 1,
+                    },
+                    crate::app_state::WorkspaceGroupSnapshot {
+                        name: "Ops".to_string(),
+                        tabs: vec![restored_workspace_group_test_tab("Deploy")],
+                        active_tab_index: 0,
+                    },
+                ],
+                0,
+            ),
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.tab_count(), 2);
+            assert_eq!(workspace.active_tab_index(), 1);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .display_title(ctx),
+                "Worker"
+            );
+
+            workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(1), ctx);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .display_title(ctx),
+                "Deploy"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_restore_empty_groups_with_default_session() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = restored_workspace(
+            &mut app,
+            restored_workspace_groups_window_snapshot(
+                vec![
+                    crate::app_state::WorkspaceGroupSnapshot {
+                        name: "Empty".to_string(),
+                        tabs: vec![],
+                        active_tab_index: 0,
+                    },
+                    crate::app_state::WorkspaceGroupSnapshot {
+                        name: "Saved".to_string(),
+                        tabs: vec![restored_workspace_group_test_tab("Saved tab")],
+                        active_tab_index: 0,
+                    },
+                ],
+                0,
+            ),
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.tab_count(), 1);
+
+            workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(1), ctx);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .display_title(ctx),
+                "Saved tab"
+            );
+
+            workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(0), ctx);
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.tab_count(), 1);
         });
     });
 }

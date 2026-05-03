@@ -115,7 +115,7 @@ use crate::{
     app_state::{
         AppState, BranchSnapshot, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents,
         LeafSnapshot, NotebookPaneSnapshot, PaneFlex, PaneNodeSnapshot, SplitDirection,
-        TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+        TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkspaceGroupSnapshot,
     },
     workspaces::user_profiles::UserProfileWithUID,
 };
@@ -826,6 +826,7 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
         diesel::delete(schema::pane_branches::dsl::pane_branches).execute(conn)?;
         diesel::delete(schema::pane_nodes::dsl::pane_nodes).execute(conn)?;
         diesel::delete(schema::tabs::dsl::tabs).execute(conn)?;
+        diesel::delete(schema::workspace_groups::dsl::workspace_groups).execute(conn)?;
         diesel::delete(schema::windows::dsl::windows).execute(conn)?;
         diesel::delete(schema::active_mcp_servers::dsl::active_mcp_servers).execute(conn)?;
         diesel::delete(schema::panels::dsl::panels).execute(conn)?;
@@ -863,6 +864,9 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                 warp_drive_index_width: window.warp_drive_index_width,
                 left_panel_open: Some(window.left_panel_open),
                 vertical_tabs_panel_open: Some(window.vertical_tabs_panel_open),
+                active_workspace_group_index: Some(
+                    window.active_workspace_group_index.try_into().unwrap_or(0),
+                ),
                 fullscreen_state: window.fullscreen_state as i32,
                 agent_management_filters: window
                     .agent_management_filters
@@ -888,10 +892,48 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                 active_window_id = Some(window_id)
             }
 
-            let tabs: Vec<NewTab> = window
-                .tabs
+            let workspace_groups = if window.workspace_groups.is_empty() {
+                vec![WorkspaceGroupSnapshot {
+                    name: "Workspace 1".to_string(),
+                    tabs: window.tabs.clone(),
+                    active_tab_index: window.active_tab_index,
+                }]
+            } else {
+                window.workspace_groups.clone()
+            };
+
+            let new_workspace_groups: Vec<model::NewWorkspaceGroup> = workspace_groups
                 .iter()
-                .map(|tab| NewTab {
+                .enumerate()
+                .map(|(group_index, group)| model::NewWorkspaceGroup {
+                    window_id,
+                    group_index: group_index.try_into().unwrap_or(0),
+                    name: group.name.clone(),
+                    active_tab_index: group.active_tab_index.try_into().unwrap_or(0),
+                })
+                .collect();
+            diesel::insert_into(schema::workspace_groups::dsl::workspace_groups)
+                .values(new_workspace_groups)
+                .execute(conn)?;
+
+            let workspace_group_ids: Vec<i32> = schema::workspace_groups::dsl::workspace_groups
+                .filter(schema::workspace_groups::columns::window_id.eq(window_id))
+                .select(schema::workspace_groups::columns::id)
+                .order(schema::workspace_groups::columns::group_index.asc())
+                .load(conn)?;
+
+            let tabs_with_groups: Vec<_> = workspace_groups
+                .iter()
+                .enumerate()
+                .flat_map(|(group_index, group)| {
+                    let workspace_group_id = workspace_group_ids.get(group_index).copied();
+                    group.tabs.iter().map(move |tab| (workspace_group_id, tab))
+                })
+                .collect();
+
+            let tabs: Vec<NewTab> = tabs_with_groups
+                .iter()
+                .map(|(workspace_group_id, tab)| NewTab {
                     window_id,
                     custom_title: tab.custom_title.clone(),
                     // We only persist and restore the selected color here
@@ -901,12 +943,15 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                         SelectedTabColor::Unset => None,
                         _ => serde_yaml::to_string(&tab.selected_color).ok(),
                     },
+                    workspace_group_id: *workspace_group_id,
                 })
                 .collect();
 
-            diesel::insert_into(schema::tabs::dsl::tabs)
-                .values(tabs)
-                .execute(conn)?;
+            if !tabs.is_empty() {
+                diesel::insert_into(schema::tabs::dsl::tabs)
+                    .values(tabs)
+                    .execute(conn)?;
+            }
 
             // Same ID issue as above.
             let tab_ids: Vec<i32> = schema::tabs::dsl::tabs
@@ -917,7 +962,7 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
 
             // Since we retrieved the tab ids in descending order, we need to reverse them when we
             // iterate to restore the correct order.
-            for (tab_id, tab) in tab_ids.iter().rev().zip(window.tabs.iter()) {
+            for (tab_id, (_, tab)) in tab_ids.iter().rev().zip(tabs_with_groups.iter()) {
                 let mut pane_nodes = VecDeque::new();
                 pane_nodes.push_back(SaveAppStateNodeTraversal {
                     node: &tab.root,
@@ -2666,6 +2711,10 @@ fn read_sqlite_data(
         .order_by(schema::tabs::columns::id.asc())
         .load::<Tab>(conn)?
         .grouped_by(&db_windows);
+    let db_workspace_groups = model::WorkspaceGroup::belonging_to(&db_windows)
+        .order_by(schema::workspace_groups::columns::group_index.asc())
+        .load::<model::WorkspaceGroup>(conn)?
+        .grouped_by(&db_windows);
 
     let db_panels = schema::panels::dsl::panels
         .load::<model::Panel>(conn)?
@@ -2677,12 +2726,14 @@ fn read_sqlite_data(
         .into_iter()
         .enumerate()
         .zip(db_tabs)
-        .map(|((idx, window), tabs_for_window)| {
-            let saved_tabs: Vec<_> = tabs_for_window
+        .zip(db_workspace_groups)
+        .map(|(((idx, window), tabs_for_window), groups_for_window)| {
+            let saved_tabs_with_groups: Vec<_> = tabs_for_window
                 .into_iter()
                 .filter_map(|tab| {
                     let root = read_root_node(conn, tab.id).ok()?;
                     let panel = db_panels.get(&tab.id);
+                    let workspace_group_id = tab.workspace_group_id;
 
                     let left_panel = panel
                         .and_then(|p| p.left_panel.as_ref())
@@ -2692,27 +2743,30 @@ fn read_sqlite_data(
                         .and_then(|p| p.right_panel.as_ref())
                         .and_then(|s| serde_json::from_str::<RightPanelSnapshot>(s).ok());
 
-                    Some(TabSnapshot {
-                        root,
-                        custom_title: tab.custom_title,
-                        default_directory_color: None,
-                        selected_color: tab
-                            .color
-                            .as_deref()
-                            .and_then(|s| {
-                                serde_yaml::from_str::<SelectedTabColor>(s)
-                                    .ok()
-                                    .or_else(|| {
-                                        // Fall back to the old format which stored a bare AnsiColorIdentifier
-                                        serde_yaml::from_str::<AnsiColorIdentifier>(s)
-                                            .ok()
-                                            .map(SelectedTabColor::Color)
-                                    })
-                            })
-                            .unwrap_or_default(),
-                        left_panel,
-                        right_panel,
-                    })
+                    Some((
+                        workspace_group_id,
+                        TabSnapshot {
+                            root,
+                            custom_title: tab.custom_title,
+                            default_directory_color: None,
+                            selected_color: tab
+                                .color
+                                .as_deref()
+                                .and_then(|s| {
+                                    serde_yaml::from_str::<SelectedTabColor>(s)
+                                        .ok()
+                                        .or_else(|| {
+                                            // Fall back to the old format which stored a bare AnsiColorIdentifier
+                                            serde_yaml::from_str::<AnsiColorIdentifier>(s)
+                                                .ok()
+                                                .map(SelectedTabColor::Color)
+                                        })
+                                })
+                                .unwrap_or_default(),
+                            left_panel,
+                            right_panel,
+                        },
+                    ))
                 })
                 .collect();
 
@@ -2725,6 +2779,43 @@ fn read_sqlite_data(
 
             // Default active tab index to 0 if we overflow when converting.
             let tab_index: usize = window.active_tab_index.try_into().unwrap_or(0);
+            let workspace_groups: Vec<WorkspaceGroupSnapshot> = if groups_for_window.is_empty() {
+                vec![WorkspaceGroupSnapshot {
+                    name: "Workspace 1".to_string(),
+                    tabs: saved_tabs_with_groups
+                        .iter()
+                        .map(|(_, tab)| tab.clone())
+                        .collect(),
+                    active_tab_index: tab_index,
+                }]
+            } else {
+                groups_for_window
+                    .iter()
+                    .map(|group| WorkspaceGroupSnapshot {
+                        name: group.name.clone(),
+                        tabs: saved_tabs_with_groups
+                            .iter()
+                            .filter(|(workspace_group_id, _)| *workspace_group_id == Some(group.id))
+                            .map(|(_, tab)| tab.clone())
+                            .collect(),
+                        active_tab_index: group.active_tab_index.try_into().unwrap_or(0),
+                    })
+                    .collect()
+            };
+            let active_group_idx = window
+                .active_workspace_group_index
+                .and_then(|idx| usize::try_from(idx).ok())
+                .unwrap_or(0)
+                .min(workspace_groups.len().saturating_sub(1));
+            let saved_tabs = workspace_groups
+                .get(active_group_idx)
+                .map(|group| group.tabs.clone())
+                .unwrap_or_else(|| {
+                    saved_tabs_with_groups
+                        .iter()
+                        .map(|(_, tab)| tab.clone())
+                        .collect()
+                });
 
             let fullscreen_state_val =
                 FullscreenState::from_i32(window.fullscreen_state).unwrap_or_default();
@@ -2783,6 +2874,8 @@ fn read_sqlite_data(
             WindowSnapshot {
                 tabs: saved_tabs,
                 active_tab_index: tab_index,
+                workspace_groups,
+                active_workspace_group_index: active_group_idx,
                 quake_mode: window.quake_mode,
                 bounds,
                 universal_search_width: window.universal_search_width,

@@ -750,6 +750,9 @@ pub enum FeatureFlag {
     /// and Project Explorer & Global Search features.
     OpenWarpNewSettingsModes,
 
+    /// Enables window-local workspace groups, where each group owns its own terminal tabs.
+    WindowWorkspaceGroups,
+
     /// Enables vertical tab layout as an alternative to the horizontal tab bar.
     VerticalTabs,
 

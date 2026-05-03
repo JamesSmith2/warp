@@ -2517,6 +2517,8 @@ pub fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::CycleNextCommandSuggestion,
         #[cfg(feature = "multi_workspace")]
         FeatureFlag::MultiWorkspace,
+        #[cfg(feature = "window_workspace_groups")]
+        FeatureFlag::WindowWorkspaceGroups,
         #[cfg(feature = "ime_marked_text")]
         FeatureFlag::ImeMarkedText,
         #[cfg(feature = "partial_next_command_suggestions")]

@@ -16,7 +16,7 @@ use super::schema::{
     object_metadata, object_permissions, pane_branches, pane_leaves, pane_nodes, panels,
     project_rules, projects, server_experiments, settings_panes, tabs, team_members, team_settings,
     teams, terminal_panes, user_profiles, welcome_panes, windows, workflow_panes, workflows,
-    workspace_language_server, workspace_metadata, workspace_teams, workspaces,
+    workspace_groups, workspace_language_server, workspace_metadata, workspace_teams, workspaces,
 };
 
 #[derive(Insertable)]
@@ -42,6 +42,7 @@ pub struct Window {
     pub agent_management_filters: Option<String>,
     pub left_panel_open: Option<bool>,
     pub vertical_tabs_panel_open: Option<bool>,
+    pub active_workspace_group_index: Option<i32>,
 }
 
 #[derive(Identifiable, Insertable, Queryable)]
@@ -339,6 +340,7 @@ pub struct NewWindow {
     pub agent_management_filters: Option<String>,
     pub left_panel_open: Option<bool>,
     pub vertical_tabs_panel_open: Option<bool>,
+    pub active_workspace_group_index: Option<i32>,
 }
 
 #[derive(Identifiable, Queryable, Associations)]
@@ -348,6 +350,7 @@ pub struct Tab {
     pub window_id: i32,
     pub custom_title: Option<String>,
     pub color: Option<String>,
+    pub workspace_group_id: Option<i32>,
 }
 
 #[derive(Insertable)]
@@ -356,6 +359,26 @@ pub struct NewTab {
     pub window_id: i32,
     pub custom_title: Option<String>,
     pub color: Option<String>,
+    pub workspace_group_id: Option<i32>,
+}
+
+#[derive(Identifiable, Queryable, Associations)]
+#[diesel(belongs_to(Window))]
+pub struct WorkspaceGroup {
+    pub id: i32,
+    pub window_id: i32,
+    pub group_index: i32,
+    pub name: String,
+    pub active_tab_index: i32,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = workspace_groups)]
+pub struct NewWorkspaceGroup {
+    pub window_id: i32,
+    pub group_index: i32,
+    pub name: String,
+    pub active_tab_index: i32,
 }
 
 /// The panes data model includes pane_nodes, pane_leaves and pane_branches.

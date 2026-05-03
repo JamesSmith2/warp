@@ -45,6 +45,8 @@ pub struct PersistedAgentManagementFilters {
 pub struct WindowSnapshot {
     pub tabs: Vec<TabSnapshot>,
     pub active_tab_index: usize,
+    pub workspace_groups: Vec<WorkspaceGroupSnapshot>,
+    pub active_workspace_group_index: usize,
     pub bounds: Option<RectF>,
     pub fullscreen_state: FullscreenState,
     pub quake_mode: bool,
@@ -57,6 +59,13 @@ pub struct WindowSnapshot {
     pub left_panel_width: Option<f32>,
     pub right_panel_width: Option<f32>,
     pub agent_management_filters: Option<PersistedAgentManagementFilters>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceGroupSnapshot {
+    pub name: String,
+    pub tabs: Vec<TabSnapshot>,
+    pub active_tab_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
