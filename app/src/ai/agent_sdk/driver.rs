@@ -343,6 +343,8 @@ pub struct Task {
     pub mcp_specs: Vec<MCPSpec>,
     /// Which harness to use for executing the agent run.
     pub harness: HarnessKind,
+    /// Runtime harness configuration used by third-party harnesses.
+    pub harness_config: Option<crate::ai::ambient_agents::task::HarnessConfig>,
 }
 
 /// Prompt that we initialize an agent driver with. Can represent either a local prompt or
@@ -1477,8 +1479,13 @@ impl AgentDriver {
             }
             HarnessKind::ThirdParty(harness) => {
                 let harness_exit_rx = Self::setup_harness(harness.as_ref(), &foreground).await?;
-                let runner =
-                    Self::prepare_harness(&task.prompt, harness.as_ref(), &foreground).await?;
+                let runner = Self::prepare_harness(
+                    &task.prompt,
+                    harness.as_ref(),
+                    task.harness_config.as_ref(),
+                    &foreground,
+                )
+                .await?;
                 Self::run_harness(runner, &foreground, harness_exit_rx).await
             }
             HarnessKind::Unsupported(harness) => Err(AgentDriverError::HarnessSetupFailed {
@@ -1528,6 +1535,7 @@ impl AgentDriver {
     async fn prepare_harness(
         prompt: &AgentRunPrompt,
         harness: &dyn ThirdPartyHarness,
+        harness_config: Option<&crate::ai::ambient_agents::task::HarnessConfig>,
         foreground: &ModelSpawner<Self>,
     ) -> Result<Arc<dyn harness::HarnessRunner>, AgentDriverError> {
         let (working_dir, task_id, server_api, terminal_driver) = foreground
@@ -1588,7 +1596,12 @@ impl AgentDriver {
             .spawn(|me, _| Arc::clone(&me.secrets))
             .await
             .map_err(|_| AgentDriverError::InvalidRuntimeState)?;
-        harness.prepare_environment_config(&working_dir, system_prompt.as_deref(), &secrets)?;
+        harness.prepare_environment_config(
+            &working_dir,
+            system_prompt.as_deref(),
+            &secrets,
+            harness_config,
+        )?;
         let resume = foreground
             .spawn(|me, _| me.resume_payload.take())
             .await

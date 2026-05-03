@@ -27,10 +27,10 @@ use crate::settings::{
     AgentModeCodingPermissionsType, AgentModeCommandExecutionDenylist,
     AgentModeCommandExecutionPredicate, AgentModeQuerySuggestionsEnabled, AwsBedrockAutoLogin,
     AwsBedrockCredentialsEnabled, CanUseWarpCreditsWithByok, CodeSettings, CodebaseContextEnabled,
-    FileBasedMcpEnabled, GitOperationsAutogenEnabled, IncludeAgentCommandsInHistory,
-    IntelligentAutosuggestionsEnabled, MemoryEnabled, NLDInTerminalEnabled,
-    NaturalLanguageAutosuggestionsEnabled, OrchestrationEnabled, RuleSuggestionsEnabled,
-    SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
+    CodexCustomEndpointEnabled, FileBasedMcpEnabled, GitOperationsAutogenEnabled,
+    IncludeAgentCommandsInHistory, IntelligentAutosuggestionsEnabled, MemoryEnabled,
+    NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled, OrchestrationEnabled,
+    RuleSuggestionsEnabled, SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
     ShouldRenderUseAgentToolbarForUserCommands, ShouldShowOzUpdatesInZeroState, ShowAgentTips,
     ShowConversationHistory, ShowHintText, ThinkingDisplayMode, VoiceInputEnabled,
     WarpDriveContextEnabled,
@@ -1510,6 +1510,7 @@ impl AISettingsPageView {
                 }
                 widgets.push(Box::new(CLIAgentWidget::default()));
                 widgets.push(Box::new(ApiKeysWidget::new(ctx)));
+                widgets.push(Box::new(CodexEndpointWidget::new(ctx)));
                 widgets.push(Box::new(AwsBedrockWidget::new(ctx)));
                 widgets.push(Box::new(AgentAttributionWidget::default()));
                 widgets.push(Box::new(OtherAIWidget::default()));
@@ -1550,6 +1551,7 @@ impl AISettingsPageView {
                     widgets.push(Box::new(VoiceWidget::default()));
                 }
                 widgets.push(Box::new(ApiKeysWidget::new(ctx)));
+                widgets.push(Box::new(CodexEndpointWidget::new(ctx)));
                 widgets.push(Box::new(AwsBedrockWidget::new(ctx)));
                 widgets.push(Box::new(AgentAttributionWidget::default()));
                 widgets.push(Box::new(OtherAIWidget::default()));
@@ -1570,6 +1572,7 @@ impl AISettingsPageView {
             }
             Some(AISubpage::ThirdPartyCLIAgents) => {
                 widgets.push(Box::new(CLIAgentWidget::default()));
+                widgets.push(Box::new(CodexEndpointWidget::new(ctx)));
             }
         }
 
@@ -2262,6 +2265,7 @@ pub enum AISettingsPageAction {
     SignupAnonymousUser,
     ToggleAwsBedrockAutoLogin,
     ToggleAwsBedrockCredentialsEnabled,
+    ToggleCodexCustomEndpoint,
     RefreshAwsBedrockCredentials,
     ToggleCloudAgentComputerUse,
     ToggleFileBasedMcp,
@@ -2947,6 +2951,14 @@ impl TypedActionView for AISettingsPageView {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {
                     report_if_error!(settings
                         .aws_bedrock_credentials_enabled
+                        .toggle_and_save_value(ctx));
+                });
+                ctx.notify();
+            }
+            AISettingsPageAction::ToggleCodexCustomEndpoint => {
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .codex_custom_endpoint_enabled
                         .toggle_and_save_value(ctx));
                 });
                 ctx.notify();
@@ -6635,6 +6647,235 @@ impl SettingsWidget for ApiKeysWidget {
         }
 
         Container::new(column.finish())
+            .with_margin_bottom(HEADER_PADDING)
+            .finish()
+    }
+}
+
+struct CodexEndpointWidget {
+    base_url_editor: ViewHandle<EditorView>,
+    model_editor: ViewHandle<EditorView>,
+    local_api_key_editor: ViewHandle<EditorView>,
+    cloud_secret_name_editor: ViewHandle<EditorView>,
+    enabled_toggle: SwitchStateHandle,
+}
+
+impl CodexEndpointWidget {
+    fn new(ctx: &mut ViewContext<<Self as SettingsWidget>::View>) -> Self {
+        let ai_settings = AISettings::as_ref(ctx);
+        let is_any_ai_enabled = ai_settings.is_any_ai_enabled(ctx);
+        let is_enabled = is_any_ai_enabled && *ai_settings.codex_custom_endpoint_enabled;
+        let base_url = ai_settings.codex_custom_endpoint_base_url.value().clone();
+        let model = ai_settings.codex_custom_endpoint_model.value().clone();
+        let cloud_secret_name = ai_settings
+            .codex_custom_endpoint_api_key_secret_name
+            .value()
+            .clone();
+        let keys = ApiKeyManager::as_ref(ctx).keys().clone();
+
+        let base_url_editor = Self::create_editor(ctx, false, "http://127.0.0.1:1234/v1", base_url);
+        let model_editor = Self::create_editor(ctx, false, "local-model", model);
+        let local_api_key_editor =
+            Self::create_editor(ctx, true, "sk-...", keys.codex_endpoint.unwrap_or_default());
+        let cloud_secret_name_editor =
+            Self::create_editor(ctx, false, "codex-endpoint-key", cloud_secret_name);
+
+        for editor in [
+            base_url_editor.clone(),
+            model_editor.clone(),
+            local_api_key_editor.clone(),
+            cloud_secret_name_editor.clone(),
+        ] {
+            AISettingsPageView::update_editor_interaction_state(editor, is_enabled, ctx);
+        }
+
+        ctx.subscribe_to_view(&base_url_editor, |_, editor, event, ctx| {
+            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+                let value = editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .codex_custom_endpoint_base_url
+                        .set_value(value, ctx));
+                });
+            }
+        });
+        ctx.subscribe_to_view(&model_editor, |_, editor, event, ctx| {
+            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+                let value = editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.codex_custom_endpoint_model.set_value(value, ctx));
+                });
+            }
+        });
+        ctx.subscribe_to_view(&local_api_key_editor, |_, editor, event, ctx| {
+            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+                let value = editor.as_ref(ctx).buffer_text(ctx);
+                let key = value.trim().is_empty().not().then_some(value);
+                ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                    manager.set_codex_endpoint_key(key, ctx);
+                });
+            }
+        });
+        ctx.subscribe_to_view(&cloud_secret_name_editor, |_, editor, event, ctx| {
+            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+                let value = editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .codex_custom_endpoint_api_key_secret_name
+                        .set_value(value, ctx));
+                });
+            }
+        });
+
+        Self {
+            base_url_editor,
+            model_editor,
+            local_api_key_editor,
+            cloud_secret_name_editor,
+            enabled_toggle: Default::default(),
+        }
+    }
+
+    fn create_editor(
+        ctx: &mut ViewContext<AISettingsPageView>,
+        is_password: bool,
+        placeholder: &'static str,
+        value: String,
+    ) -> ViewHandle<EditorView> {
+        ctx.add_typed_action_view(move |ctx| {
+            let appearance = Appearance::handle(ctx).as_ref(ctx);
+            let options = SingleLineEditorOptions {
+                is_password,
+                text: TextOptions {
+                    font_size_override: Some(appearance.ui_font_size()),
+                    font_family_override: Some(appearance.monospace_font_family()),
+                    text_colors_override: Some(TextColors {
+                        default_color: appearance.theme().active_ui_text_color(),
+                        disabled_color: appearance.theme().disabled_ui_text_color(),
+                        hint_color: appearance.theme().disabled_ui_text_color(),
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut editor = EditorView::single_line(options, ctx);
+            editor.set_placeholder_text(placeholder, ctx);
+            editor.set_buffer_text(&value, ctx);
+            editor
+        })
+    }
+
+    fn render_input(
+        appearance: &Appearance,
+        label: &'static str,
+        editor: ViewHandle<EditorView>,
+        is_enabled: bool,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let padding = Some(Coords {
+            top: 10.,
+            bottom: 10.,
+            left: 16.,
+            right: 16.,
+        });
+        let editor_style = UiComponentStyles {
+            padding,
+            background: Some(appearance.theme().surface_2().into()),
+            ..Default::default()
+        };
+
+        Flex::column()
+            .with_spacing(8.)
+            .with_child(
+                Text::new_inline(label, appearance.ui_font_family(), CONTENT_FONT_SIZE)
+                    .with_color(styles::header_font_color(is_enabled, app).into())
+                    .finish(),
+            )
+            .with_child(
+                appearance
+                    .ui_builder()
+                    .text_input(editor)
+                    .with_style(editor_style)
+                    .build()
+                    .finish(),
+            )
+            .finish()
+    }
+}
+
+impl SettingsWidget for CodexEndpointWidget {
+    type View = AISettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "codex custom endpoint openai compatible chat completions local model"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let ai_settings = AISettings::as_ref(app);
+        let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
+        let is_enabled = is_any_ai_enabled && *ai_settings.codex_custom_endpoint_enabled;
+
+        let mut column = Flex::column()
+            .with_child(render_separator(appearance))
+            .with_child(
+                build_sub_header(
+                    appearance,
+                    "Codex custom endpoint",
+                    Some(styles::header_font_color(is_any_ai_enabled, app)),
+                )
+                .with_padding_bottom(HEADER_PADDING)
+                .finish(),
+            )
+            .with_child(render_ai_setting_toggle::<CodexCustomEndpointEnabled>(
+                "Use custom endpoint",
+                AISettingsPageAction::ToggleCodexCustomEndpoint,
+                *ai_settings.codex_custom_endpoint_enabled,
+                is_any_ai_enabled,
+                self.enabled_toggle.clone(),
+                &view.local_only_icon_tooltip_states,
+                app,
+            ))
+            .with_child(render_ai_setting_description(
+                "Route Codex CLI through an OpenAI-compatible endpoint. The URL is normalized to the /v1 base; local keys stay on this device, and cloud runs use the configured managed secret name.",
+                is_any_ai_enabled,
+                app,
+            ));
+
+        column.add_child(Self::render_input(
+            appearance,
+            "Base URL",
+            self.base_url_editor.clone(),
+            is_enabled,
+            app,
+        ));
+        column.add_child(Self::render_input(
+            appearance,
+            "Model",
+            self.model_editor.clone(),
+            is_enabled,
+            app,
+        ));
+        column.add_child(Self::render_input(
+            appearance,
+            "Local API Key",
+            self.local_api_key_editor.clone(),
+            is_enabled,
+            app,
+        ));
+        column.add_child(Self::render_input(
+            appearance,
+            "Cloud Secret Name",
+            self.cloud_secret_name_editor.clone(),
+            is_enabled,
+            app,
+        ));
+
+        Container::new(column.with_spacing(16.).finish())
             .with_margin_bottom(HEADER_PADDING)
             .finish()
     }

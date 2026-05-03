@@ -54,6 +54,7 @@ impl ThirdPartyHarness for GeminiHarness {
         working_dir: &Path,
         system_prompt: Option<&str>,
         _secrets: &HashMap<String, ManagedSecretValue>,
+        _config: Option<&crate::ai::ambient_agents::task::HarnessConfig>,
     ) -> Result<(), AgentDriverError> {
         prepare_gemini_environment_config(working_dir, system_prompt).map_err(|error| {
             AgentDriverError::HarnessConfigSetupFailed {

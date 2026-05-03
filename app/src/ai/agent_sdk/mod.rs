@@ -21,9 +21,11 @@ use crate::ai::llms::LLMId;
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::server::server_api::ai::AIClient;
+use crate::settings::AISettings;
 use crate::workflows::workflow::Workflow;
 use ai::api_keys::{ApiKeyManager, AwsCredentialsRefreshStrategy};
 use anyhow::Context;
+use settings::Setting as _;
 use warp_cli::{
     agent::{AgentCommand, AgentProfileCommand, OutputFormat},
     artifact::ArtifactCommand,
@@ -49,7 +51,10 @@ use warpui::ModelSpawner;
 use warpui::{platform::TerminationMode, AppContext, SingletonEntity};
 
 use crate::{
-    ai::ambient_agents::{task::HarnessConfig, AmbientAgentTaskId},
+    ai::ambient_agents::{
+        task::{CodexHarnessConfig, HarnessConfig},
+        AmbientAgentTaskId,
+    },
     ai::cloud_environments::CloudAmbientAgentEnvironment,
     auth::AuthStateProvider,
     send_telemetry_sync_from_app_ctx,
@@ -261,6 +266,12 @@ fn run_agent(
                     "The opencode harness is only supported for local child agent launches."
                 ));
             }
+            validate_codex_args_for_harness(
+                args.harness,
+                args.codex_base_url.as_deref(),
+                args.codex_model.as_deref(),
+                None,
+            )?;
 
             let server_api = ServerApiProvider::handle(ctx).as_ref(ctx).get_ai_client();
 
@@ -305,11 +316,158 @@ fn run_agent(
                     "--claude-auth-secret is only valid with --harness claude."
                 ));
             }
+            validate_codex_args_for_harness(
+                args.harness,
+                args.codex_base_url.as_deref(),
+                args.codex_model.as_deref(),
+                args.codex_api_key_secret.as_deref(),
+            )?;
             ambient::run_ambient_agent(ctx, args)
         }
         AgentCommand::Profile(sub) => profiles::run(ctx, global_options, sub),
         AgentCommand::List(args) => agent_config::list_agents(ctx, args),
     }
+}
+
+fn validate_codex_args_for_harness(
+    harness: Harness,
+    base_url: Option<&str>,
+    model: Option<&str>,
+    api_key_secret: Option<&str>,
+) -> anyhow::Result<()> {
+    if harness == Harness::Codex {
+        return Ok(());
+    }
+    if base_url.is_some() {
+        return Err(anyhow::anyhow!(
+            "--codex-base-url is only valid with --harness codex."
+        ));
+    }
+    if model.is_some() {
+        return Err(anyhow::anyhow!(
+            "--codex-model is only valid with --harness codex."
+        ));
+    }
+    if api_key_secret.is_some() {
+        return Err(anyhow::anyhow!(
+            "--codex-api-key-secret is only valid with --harness codex."
+        ));
+    }
+    Ok(())
+}
+
+fn codex_config_from_settings(ctx: &mut AppContext) -> Option<CodexHarnessConfig> {
+    let ai_settings = AISettings::as_ref(ctx);
+    if !*ai_settings.codex_custom_endpoint_enabled {
+        return None;
+    }
+    let keys = ApiKeyManager::as_ref(ctx).keys();
+    Some(
+        CodexHarnessConfig {
+            base_url: Some(ai_settings.codex_custom_endpoint_base_url.value().clone()),
+            model: Some(ai_settings.codex_custom_endpoint_model.value().clone()),
+            api_key_secret_name: Some(
+                ai_settings
+                    .codex_custom_endpoint_api_key_secret_name
+                    .value()
+                    .clone(),
+            ),
+            local_api_key: keys.codex_endpoint.clone(),
+        }
+        .normalized(),
+    )
+    .filter(|config| !config.is_empty())
+}
+
+fn codex_config_from_run_args(
+    args: &RunAgentArgs,
+    file_config: Option<CodexHarnessConfig>,
+    ctx: &mut AppContext,
+) -> Option<CodexHarnessConfig> {
+    let mut config = file_config
+        .or_else(|| codex_config_from_settings(ctx))
+        .unwrap_or_default();
+    if let Some(base_url) = &args.codex_base_url {
+        config.base_url = Some(base_url.clone());
+    }
+    if let Some(model) = &args.codex_model {
+        config.model = Some(model.clone());
+    }
+    let config = config.normalized();
+    (!config.is_empty()).then_some(config)
+}
+
+fn harness_config_for_run_args(
+    args: &RunAgentArgs,
+    file_config: Option<HarnessConfig>,
+    ctx: &mut AppContext,
+) -> Option<HarnessConfig> {
+    let harness_type = if args.harness != Harness::Oz {
+        args.harness
+    } else {
+        file_config
+            .as_ref()
+            .map(|config| config.harness_type)
+            .unwrap_or(Harness::Oz)
+    };
+    if harness_type == Harness::Oz {
+        return None;
+    }
+    let codex = (harness_type == Harness::Codex)
+        .then(|| codex_config_from_run_args(args, file_config.and_then(|config| config.codex), ctx))
+        .flatten();
+    Some(HarnessConfig {
+        harness_type,
+        codex,
+    })
+}
+
+pub(super) fn codex_config_from_run_cloud_args(
+    args: &warp_cli::agent::RunCloudArgs,
+    file_config: Option<CodexHarnessConfig>,
+    ctx: &mut AppContext,
+) -> Option<CodexHarnessConfig> {
+    let mut config = file_config
+        .or_else(|| codex_config_from_settings(ctx))
+        .unwrap_or_default();
+    if let Some(base_url) = &args.codex_base_url {
+        config.base_url = Some(base_url.clone());
+    }
+    if let Some(model) = &args.codex_model {
+        config.model = Some(model.clone());
+    }
+    if let Some(secret) = &args.codex_api_key_secret {
+        config.api_key_secret_name = Some(secret.clone());
+    }
+    let config = config.normalized();
+    (!config.is_empty()).then_some(config)
+}
+
+pub(super) fn harness_config_for_run_cloud_args(
+    args: &warp_cli::agent::RunCloudArgs,
+    file_config: Option<HarnessConfig>,
+    ctx: &mut AppContext,
+) -> Option<HarnessConfig> {
+    let harness_type = if args.harness != Harness::Oz {
+        args.harness
+    } else {
+        file_config
+            .as_ref()
+            .map(|config| config.harness_type)
+            .unwrap_or(Harness::Oz)
+    };
+    if harness_type == Harness::Oz {
+        return None;
+    }
+    let codex = (harness_type == Harness::Codex)
+        .then(|| {
+            codex_config_from_run_cloud_args(args, file_config.and_then(|config| config.codex), ctx)
+        })
+        .flatten();
+    Some(HarnessConfig {
+        harness_type,
+        codex,
+    })
 }
 
 /// Build the merged agent configuration from all sources and the Task for the driver.
@@ -343,9 +501,11 @@ fn build_merged_config_and_task(
         None => (None, None),
     };
 
-    let harness_override = (args.harness != Harness::Oz).then_some(HarnessConfig {
-        harness_type: args.harness,
-    });
+    let harness_override = harness_config_for_run_args(args, file_merged.harness.clone(), ctx);
+    let effective_harness = harness_override
+        .as_ref()
+        .map(|config| config.harness_type)
+        .unwrap_or(Harness::Oz);
 
     let mut merged_config = AgentConfigSnapshot {
         // CLI name > skill name > file name
@@ -362,7 +522,7 @@ fn build_merged_config_and_task(
             .computer_use
             .computer_use_override()
             .or(file_merged.computer_use_enabled),
-        harness: harness_override,
+        harness: harness_override.clone(),
         harness_auth_secrets: None,
     };
 
@@ -400,7 +560,8 @@ fn build_merged_config_and_task(
         model: model_override,
         profile: args.profile.clone(),
         mcp_specs: runtime_mcp_specs,
-        harness: harness_kind(args.harness)?,
+        harness: harness_kind(effective_harness)?,
+        harness_config: harness_override,
     };
 
     Ok((merged_config, task))
@@ -427,9 +588,11 @@ fn build_server_side_task(
         .map(|model_id| common::validate_agent_mode_base_model_id(model_id, ctx))
         .transpose()?;
 
-    let harness_override = (args.harness != Harness::Oz).then_some(HarnessConfig {
-        harness_type: args.harness,
-    });
+    let harness_override = harness_config_for_run_args(args, None, ctx);
+    let effective_harness = harness_override
+        .as_ref()
+        .map(|config| config.harness_type)
+        .unwrap_or(Harness::Oz);
 
     let skill_name = resolved_skill.as_ref().map(|s| s.name.clone());
     let model_id_string = model_override.as_ref().map(|id| id.to_string());
@@ -446,7 +609,7 @@ fn build_server_side_task(
         worker_host: None,
         skill_spec: None,
         computer_use_enabled: args.computer_use.computer_use_override(),
-        harness: harness_override,
+        harness: harness_override.clone(),
         harness_auth_secrets: None,
     };
 
@@ -460,7 +623,8 @@ fn build_server_side_task(
         model: model_override,
         profile,
         mcp_specs: runtime_mcp_specs,
-        harness: harness_kind(args.harness)?,
+        harness: harness_kind(effective_harness)?,
+        harness_config: harness_override,
     };
 
     Ok((config, task))

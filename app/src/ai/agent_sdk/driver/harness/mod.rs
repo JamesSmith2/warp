@@ -14,6 +14,7 @@ use warp_managed_secrets::ManagedSecretValue;
 use warpui::{ModelHandle, ModelSpawner, SingletonEntity};
 
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::ambient_agents::task::HarnessConfig;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::server::server_api::harness_support::{upload_to_target, HarnessSupportClient};
 use crate::server::server_api::ServerApi;
@@ -143,6 +144,7 @@ pub(crate) trait ThirdPartyHarness: Send + Sync {
         _working_dir: &Path,
         _system_prompt: Option<&str>,
         _secrets: &HashMap<String, ManagedSecretValue>,
+        _config: Option<&HarnessConfig>,
     ) -> Result<(), AgentDriverError> {
         Ok(())
     }

@@ -15,6 +15,7 @@ use warp_managed_secrets::ManagedSecretValue;
 use warpui::{ModelHandle, ModelSpawner, SingletonEntity};
 
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::ambient_agents::task::{CodexHarnessConfig, HarnessConfig};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::server::server_api::harness_support::{upload_to_target, HarnessSupportClient};
 use crate::server::server_api::ServerApi;
@@ -59,13 +60,15 @@ impl ThirdPartyHarness for CodexHarness {
         working_dir: &Path,
         system_prompt: Option<&str>,
         secrets: &HashMap<String, ManagedSecretValue>,
+        config: Option<&HarnessConfig>,
     ) -> Result<(), AgentDriverError> {
-        prepare_codex_environment_config(working_dir, system_prompt, secrets).map_err(|error| {
-            AgentDriverError::HarnessConfigSetupFailed {
+        let codex_config = config.and_then(|config| config.codex.as_ref());
+        prepare_codex_environment_config(working_dir, system_prompt, secrets, codex_config).map_err(
+            |error| AgentDriverError::HarnessConfigSetupFailed {
                 harness: self.cli_agent().command_prefix().to_owned(),
                 error,
-            }
-        })
+            },
+        )
     }
 
     /// Fetch the codex transcript for the current task's conversation and wrap it into a
@@ -440,22 +443,49 @@ fn prepare_codex_environment_config(
     working_dir: &Path,
     system_prompt: Option<&str>,
     secrets: &HashMap<String, ManagedSecretValue>,
+    config: Option<&CodexHarnessConfig>,
 ) -> Result<()> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
     let codex_dir = home_dir.join(CODEX_CONFIG_DIR);
+    let resolved_config = ResolvedCodexHarnessConfig::from_config(config)?;
 
     if let Some(prompt) = system_prompt {
         write_codex_agents_override(&codex_dir, prompt)?;
     }
 
-    match resolve_openai_api_key(secrets) {
+    match resolve_openai_api_key(secrets, config) {
         Some(api_key) => prepare_codex_auth(&codex_dir.join(CODEX_AUTH_FILE_NAME), &api_key)?,
         None => log::info!("No OPENAI_API_KEY available; skipping Codex auth.json seed"),
     }
 
-    prepare_codex_config_toml(&codex_dir.join(CODEX_CONFIG_TOML_FILE_NAME), working_dir)?;
+    prepare_codex_config_toml(
+        &codex_dir.join(CODEX_CONFIG_TOML_FILE_NAME),
+        working_dir,
+        &resolved_config,
+    )?;
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedCodexHarnessConfig {
+    base_url: String,
+    model: Option<String>,
+}
+
+impl ResolvedCodexHarnessConfig {
+    fn from_config(config: Option<&CodexHarnessConfig>) -> Result<Self> {
+        let base_url = match config.and_then(|config| config.base_url.as_deref()) {
+            Some(base_url) => normalize_codex_openai_base_url(base_url)?,
+            None => CODEX_OPENAI_BASE_URL.to_owned(),
+        };
+        let model = config
+            .and_then(|config| config.model.as_deref())
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned);
+        Ok(Self { base_url, model })
+    }
 }
 
 fn write_codex_agents_override(codex_dir: &Path, system_prompt: &str) -> Result<()> {
@@ -539,7 +569,17 @@ fn write_codex_auth_json(path: &Path, auth: &CodexAuthDotJson) -> Result<()> {
 /// var so the seeded `auth.json` matches the credential the launched Codex process
 /// will see. [`AgentDriver::new`] skips a managed `OPENAI_API_KEY` secret when the
 /// env var is already set, so we mirror that precedence here.
-fn resolve_openai_api_key(secrets: &HashMap<String, ManagedSecretValue>) -> Option<String> {
+fn resolve_openai_api_key(
+    secrets: &HashMap<String, ManagedSecretValue>,
+    config: Option<&CodexHarnessConfig>,
+) -> Option<String> {
+    if let Some(value) = config
+        .and_then(|config| config.local_api_key.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_owned());
+    }
     if let Ok(value) = std::env::var(OPENAI_API_KEY_ENV) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
@@ -561,7 +601,11 @@ fn resolve_openai_api_key(secrets: &HashMap<String, ManagedSecretValue>) -> Opti
 ///   set the projects to `trusted`.
 /// - base URL: set `openai_base_url = "<US data-residency endpoint>"` so we
 ///   hit the regional host our API keys require.
-fn prepare_codex_config_toml(config_toml_path: &Path, working_dir: &Path) -> Result<()> {
+fn prepare_codex_config_toml(
+    config_toml_path: &Path,
+    working_dir: &Path,
+    config: &ResolvedCodexHarnessConfig,
+) -> Result<()> {
     let existing = match fs::read_to_string(config_toml_path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -579,7 +623,10 @@ fn prepare_codex_config_toml(config_toml_path: &Path, working_dir: &Path) -> Res
         )
     })?;
 
-    set_codex_openai_base_url(&mut doc, CODEX_OPENAI_BASE_URL);
+    set_codex_openai_base_url(&mut doc, &config.base_url);
+    if let Some(model) = &config.model {
+        doc["model"] = toml_edit::value(model);
+    }
 
     let canonical = working_dir.canonicalize().with_context(|| {
         format!(
@@ -614,6 +661,54 @@ fn prepare_codex_config_toml(config_toml_path: &Path, working_dir: &Path) -> Res
 /// Set the top-level `openai_base_url` key, overwriting any existing value.
 fn set_codex_openai_base_url(doc: &mut toml_edit::DocumentMut, base_url: &str) {
     doc[CODEX_OPENAI_BASE_URL_KEY] = toml_edit::value(base_url);
+}
+
+fn normalize_codex_openai_base_url(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("Codex base URL cannot be empty"));
+    }
+    let mut url = url::Url::parse(trimmed)
+        .with_context(|| format!("Invalid Codex OpenAI-compatible base URL: {trimmed}"))?;
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            return Err(anyhow::anyhow!(
+                "Codex base URL must use http or https, got {scheme:?}"
+            ));
+        }
+    }
+
+    let mut segments: Vec<String> = url
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(v1_index) = segments.iter().position(|segment| segment == "v1") {
+        segments.truncate(v1_index + 1);
+    } else {
+        segments.push("v1".to_owned());
+    }
+    {
+        let mut path_segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("Codex base URL cannot be used as a base URL"))?;
+        path_segments.clear();
+        for segment in &segments {
+            path_segments.push(segment);
+        }
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    let mut normalized = url.to_string();
+    if normalized.ends_with('/') {
+        normalized.pop();
+    }
+    Ok(normalized)
 }
 
 /// Return immediate subdirectories of `dir` that contain a `.git`.

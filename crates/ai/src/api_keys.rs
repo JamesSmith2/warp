@@ -18,10 +18,16 @@ pub enum ApiKeyManagerEvent {
 /// users to use their own API keys instead of Warp's.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ApiKeys {
+    #[serde(default)]
     pub google: Option<String>,
+    #[serde(default)]
     pub anthropic: Option<String>,
+    #[serde(default)]
     pub openai: Option<String>,
+    #[serde(default)]
     pub open_router: Option<String>,
+    #[serde(default)]
+    pub codex_endpoint: Option<String>,
 }
 
 impl ApiKeys {
@@ -30,6 +36,7 @@ impl ApiKeys {
             || self.anthropic.is_some()
             || self.google.is_some()
             || self.open_router.is_some()
+            || self.codex_endpoint.is_some()
     }
 }
 
@@ -89,6 +96,12 @@ impl ApiKeyManager {
 
     pub fn set_open_router_key(&mut self, key: Option<String>, ctx: &mut ModelContext<Self>) {
         self.keys.open_router = key;
+        ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+        self.write_keys_to_secure_storage(ctx);
+    }
+
+    pub fn set_codex_endpoint_key(&mut self, key: Option<String>, ctx: &mut ModelContext<Self>) {
+        self.keys.codex_endpoint = key;
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
     }

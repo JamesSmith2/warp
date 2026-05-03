@@ -74,13 +74,64 @@ pub struct HarnessConfig {
         deserialize_with = "deserialize_harness"
     )]
     pub harness_type: Harness,
+    /// Codex-specific OpenAI-compatible endpoint settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<CodexHarnessConfig>,
 }
 
 impl HarnessConfig {
     /// Builds a harness config from just the harness type.
     pub fn from_harness_type(harness_type: Harness) -> Self {
-        Self { harness_type }
+        Self {
+            harness_type,
+            codex: None,
+        }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CodexHarnessConfig {
+    /// OpenAI-compatible base URL. If present, this is normalized before writing
+    /// Codex config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Codex model name to write into `.codex/config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Name of a managed secret injected as `OPENAI_API_KEY` for cloud runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_secret_name: Option<String>,
+    /// Local-only API key from secure storage. This is intentionally never
+    /// serialized into task snapshots or public API requests.
+    #[serde(skip)]
+    pub local_api_key: Option<String>,
+}
+
+impl CodexHarnessConfig {
+    pub fn is_empty(&self) -> bool {
+        self.base_url.as_deref().map_or(true, str::is_empty)
+            && self.model.as_deref().map_or(true, str::is_empty)
+            && self
+                .api_key_secret_name
+                .as_deref()
+                .map_or(true, str::is_empty)
+            && self.local_api_key.as_deref().map_or(true, str::is_empty)
+    }
+
+    pub fn normalized(mut self) -> Self {
+        self.base_url = trim_to_non_empty(self.base_url);
+        self.model = trim_to_non_empty(self.model);
+        self.api_key_secret_name = trim_to_non_empty(self.api_key_secret_name);
+        self.local_api_key = trim_to_non_empty(self.local_api_key);
+        self
+    }
+}
+
+fn trim_to_non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
 }
 
 fn serialize_harness<S: Serializer>(harness: &Harness, serializer: S) -> Result<S::Ok, S::Error> {
@@ -101,6 +152,9 @@ pub struct HarnessAuthSecretsConfig {
     /// Name of a managed secret for Claude Code harness authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_auth_secret_name: Option<String>,
+    /// Name of a managed secret for Codex endpoint authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_api_key_secret_name: Option<String>,
 }
 
 impl AgentConfigSnapshot {

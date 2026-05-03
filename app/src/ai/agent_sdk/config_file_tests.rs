@@ -5,6 +5,7 @@ use std::io::Write as _;
 use serde_json::json;
 
 use crate::ai::ambient_agents::AgentConfigSnapshot;
+use warp_cli::agent::Harness;
 use warp_cli::mcp::MCPSpec;
 
 fn write_temp(suffix: &str, contents: &str) -> tempfile::NamedTempFile {
@@ -164,6 +165,54 @@ fn loads_computer_use_enabled_from_json() {
     let loaded = super::load_config_file(file.path()).unwrap();
 
     assert_eq!(loaded.file.computer_use_enabled, Some(true));
+}
+
+#[test]
+fn loads_codex_harness_config_from_yaml() {
+    let contents = r#"
+harness:
+  type: codex
+  codex:
+    base_url: http://127.0.0.1:1234/v1/chat/completions
+    model: local-model
+    api_key_secret_name: codex-key
+"#;
+
+    let file = write_temp(".yaml", contents);
+    let loaded = super::load_config_file(file.path()).unwrap();
+    let harness = loaded.file.harness.as_ref().unwrap();
+
+    assert_eq!(harness.harness_type, Harness::Codex);
+    let codex = harness.codex.as_ref().unwrap();
+    assert_eq!(
+        codex.base_url.as_deref(),
+        Some("http://127.0.0.1:1234/v1/chat/completions")
+    );
+    assert_eq!(codex.model.as_deref(), Some("local-model"));
+    assert_eq!(codex.api_key_secret_name.as_deref(), Some("codex-key"));
+}
+
+#[test]
+fn merge_precedence_cli_harness_over_file() {
+    let contents = r#"
+harness:
+  type: codex
+  codex:
+    base_url: http://127.0.0.1:1234/v1
+"#;
+    let file = write_temp(".yaml", contents);
+    let loaded = super::load_config_file(file.path()).unwrap();
+
+    let cli = AgentConfigSnapshot {
+        harness: Some(
+            crate::ai::ambient_agents::task::HarnessConfig::from_harness_type(Harness::Claude),
+        ),
+        ..Default::default()
+    };
+
+    let merged = super::merge_with_precedence(Some(&loaded), cli);
+
+    assert_eq!(merged.harness.unwrap().harness_type, Harness::Claude);
 }
 
 #[test]

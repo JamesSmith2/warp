@@ -1627,6 +1627,73 @@ fn agent_run_cloud_claude_auth_secret_without_harness_parses() {
 }
 
 #[test]
+fn agent_run_accepts_codex_endpoint_args() {
+    let args = Args::try_parse_from([
+        "warp",
+        "agent",
+        "run",
+        "--prompt",
+        "hello",
+        "--harness",
+        "codex",
+        "--codex-base-url",
+        "http://127.0.0.1:1234/v1",
+        "--codex-model",
+        "local-model",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp agent run` command");
+    };
+    let CliCommand::Agent(AgentCommand::Run(run_args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp agent run` command");
+    };
+
+    assert_eq!(run_args.harness, Harness::Codex);
+    assert_eq!(
+        run_args.codex_base_url.as_deref(),
+        Some("http://127.0.0.1:1234/v1")
+    );
+    assert_eq!(run_args.codex_model.as_deref(), Some("local-model"));
+}
+
+#[test]
+fn agent_run_cloud_accepts_codex_endpoint_args() {
+    let args = Args::try_parse_from([
+        "warp",
+        "agent",
+        "run-cloud",
+        "--prompt",
+        "hello",
+        "--harness",
+        "codex",
+        "--codex-base-url",
+        "http://127.0.0.1:1234/v1",
+        "--codex-model",
+        "local-model",
+        "--codex-api-key-secret",
+        "codex-key",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp agent run-cloud` command");
+    };
+    let CliCommand::Agent(AgentCommand::RunCloud(run_args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp agent run-cloud` command");
+    };
+
+    assert_eq!(run_args.harness, Harness::Codex);
+    assert_eq!(
+        run_args.codex_base_url.as_deref(),
+        Some("http://127.0.0.1:1234/v1")
+    );
+    assert_eq!(run_args.codex_model.as_deref(), Some("local-model"));
+    assert_eq!(run_args.codex_api_key_secret.as_deref(), Some("codex-key"));
+}
+
+#[test]
 fn run_message_send_parses() {
     let args = Args::try_parse_from([
         "warp",

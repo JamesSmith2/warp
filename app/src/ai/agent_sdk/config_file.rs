@@ -4,6 +4,7 @@ use anyhow::Context as _;
 use serde_json::{Map, Value};
 use warp_cli::mcp::MCPSpec;
 
+use crate::ai::ambient_agents::task::HarnessConfig;
 use crate::ai::ambient_agents::AgentConfigSnapshot;
 
 /// A strict, file-based representation of `AgentConfigSnapshot`.
@@ -29,6 +30,8 @@ pub struct AgentConfigSnapshotFile {
     pub host: Option<String>,
     #[serde(default)]
     pub computer_use_enabled: Option<bool>,
+    #[serde(default)]
+    pub harness: Option<HarnessConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,7 +96,7 @@ fn parse_yaml(input: &str) -> anyhow::Result<AgentConfigSnapshotFile> {
 }
 
 fn supported_keys_context() -> String {
-    "Supported keys: name, environment_id, model_id, base_prompt, mcp_servers, host, computer_use_enabled".to_string()
+    "Supported keys: name, environment_id, model_id, base_prompt, mcp_servers, host, computer_use_enabled, harness".to_string()
 }
 
 /// Convert an unwrapped `mcp_servers` map into runtime MCP specs for AgentDriver.
@@ -165,7 +168,7 @@ pub fn merge_with_precedence(
         worker_host,
         skill_spec: cli.skill_spec,
         computer_use_enabled,
-        harness: cli.harness,
+        harness: cli.harness.or_else(|| file.harness.clone()),
         harness_auth_secrets: cli.harness_auth_secrets,
     }
 }

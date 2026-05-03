@@ -346,6 +346,18 @@ pub struct RunAgentArgs {
     /// "claude" delegates to the `claude` CLI.
     #[arg(long = "harness", value_name = "HARNESS", default_value_t = Harness::Oz, hide = true)]
     pub harness: Harness,
+
+    /// OpenAI-compatible base URL for Codex CLI requests.
+    ///
+    /// Only valid when --harness is set to "codex".
+    #[arg(long = "codex-base-url", value_name = "URL", hide = true)]
+    pub codex_base_url: Option<String>,
+
+    /// Model name to write into Codex CLI config.
+    ///
+    /// Only valid when --harness is set to "codex".
+    #[arg(long = "codex-model", value_name = "MODEL", hide = true)]
+    pub codex_model: Option<String>,
 }
 
 impl RunAgentArgs {
@@ -474,6 +486,25 @@ pub struct RunCloudArgs {
     /// Only valid when --harness is set to "claude".
     #[arg(long = "claude-auth-secret", value_name = "NAME", hide = true)]
     pub claude_auth_secret: Option<String>,
+
+    /// OpenAI-compatible base URL for Codex CLI requests.
+    ///
+    /// Only valid when --harness is set to "codex".
+    #[arg(long = "codex-base-url", value_name = "URL", hide = true)]
+    pub codex_base_url: Option<String>,
+
+    /// Model name to write into Codex CLI config.
+    ///
+    /// Only valid when --harness is set to "codex".
+    #[arg(long = "codex-model", value_name = "MODEL", hide = true)]
+    pub codex_model: Option<String>,
+
+    /// Name of a managed secret for Codex endpoint authentication.
+    ///
+    /// Resolved server-side and injected into the agent container as OPENAI_API_KEY.
+    /// Only valid when --harness is set to "codex".
+    #[arg(long = "codex-api-key-secret", value_name = "NAME", hide = true)]
+    pub codex_api_key_secret: Option<String>,
 }
 
 /// Arguments for listing available agents.

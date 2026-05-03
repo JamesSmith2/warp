@@ -7,7 +7,6 @@ use crate::ai::agent::extract_user_query_mode;
 use crate::ai::ambient_agents::spawn::{
     spawn_task, AmbientAgentEvent, SessionJoinInfo, TASK_STATUS_POLLING_DURATION,
 };
-use crate::ai::ambient_agents::task::HarnessConfig;
 use crate::ai::ambient_agents::AmbientAgentTaskState;
 use crate::ai::ambient_agents::{AgentConfigSnapshot, AmbientAgentTask, AmbientAgentTaskId};
 use crate::ai::artifacts::Artifact;
@@ -29,7 +28,7 @@ use futures::{future, StreamExt};
 use serde::Serialize;
 
 use warp_cli::{
-    agent::{Harness, OutputFormat, Prompt, RunCloudArgs},
+    agent::{OutputFormat, Prompt, RunCloudArgs},
     json_filter::JsonOutput,
     task::{
         ArtifactTypeArg, ExecutionLocationArg, ListTasksArgs, MessageCommand, MessageDeliveredArgs,
@@ -371,6 +370,19 @@ impl AmbientAgentRunner {
                 vec![]
             };
 
+            let harness_override = super::harness_config_for_run_cloud_args(
+                &args,
+                loaded_file.as_ref().and_then(|f| f.file.harness.clone()),
+                ctx,
+            );
+            let harness_auth_secrets =
+                (args.claude_auth_secret.is_some() || args.codex_api_key_secret.is_some()).then(
+                    || crate::ai::ambient_agents::task::HarnessAuthSecretsConfig {
+                        claude_auth_secret_name: args.claude_auth_secret.clone(),
+                        codex_api_key_secret_name: args.codex_api_key_secret.clone(),
+                    },
+                );
+
             let mut environment_args = args.environment;
             if environment_args.environment.is_none() && !environment_args.no_environment {
                 if let Some(environment_id) = loaded_file
@@ -414,15 +426,6 @@ impl AmbientAgentRunner {
                         return;
                     }
                 };
-
-            let harness_override = (args.harness != Harness::Oz).then_some(HarnessConfig {
-                harness_type: args.harness,
-            });
-            let harness_auth_secrets = args.claude_auth_secret.clone().map(|name| {
-                crate::ai::ambient_agents::task::HarnessAuthSecretsConfig {
-                    claude_auth_secret_name: Some(name),
-                }
-            });
 
             let merged_config = super::config_file::merge_with_precedence(
                 loaded_file.as_ref(),

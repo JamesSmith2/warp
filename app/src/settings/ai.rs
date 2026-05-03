@@ -1204,6 +1204,46 @@ define_settings_group!(AISettings, settings: [
         description: "Whether Warp credits can be used even when providing your own API key.",
     }
 
+    codex_custom_endpoint_enabled: CodexCustomEndpointEnabled {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.third_party_cli_agents.codex.custom_endpoint_enabled",
+        description: "Whether Codex CLI should use a custom OpenAI-compatible endpoint.",
+    }
+
+    codex_custom_endpoint_base_url: CodexCustomEndpointBaseUrl {
+        type: String,
+        default: String::new(),
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.third_party_cli_agents.codex.custom_endpoint_base_url",
+        description: "The OpenAI-compatible base URL Codex CLI should use.",
+    }
+
+    codex_custom_endpoint_model: CodexCustomEndpointModel {
+        type: String,
+        default: String::new(),
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.third_party_cli_agents.codex.custom_endpoint_model",
+        description: "The model name Codex CLI should use for the custom endpoint.",
+    }
+
+    codex_custom_endpoint_api_key_secret_name: CodexCustomEndpointApiKeySecretName {
+        type: String,
+        default: String::new(),
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.third_party_cli_agents.codex.custom_endpoint_api_key_secret_name",
+        description: "The managed secret name to inject for Codex custom endpoint cloud runs.",
+    }
+
     should_render_use_agent_footer_for_user_commands: ShouldRenderUseAgentToolbarForUserCommands {
         type: bool,
         default: true,
