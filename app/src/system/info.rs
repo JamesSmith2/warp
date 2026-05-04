@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::OsStr;
+use std::time::Instant;
 
 use byte_unit::Byte;
 use chrono::{DateTime, Local, Utc};
@@ -9,7 +10,7 @@ use ordered_float::OrderedFloat;
 use serde::Serialize;
 use sysinfo::ProcessesToUpdate;
 use warp_core::channel::ChannelState;
-use warpui::{App, AppContext, Entity, ModelContext, SingletonEntity};
+use warpui::{render_diagnostics, App, AppContext, Entity, ModelContext, SingletonEntity};
 
 use crate::{
     send_telemetry_from_app_ctx, send_telemetry_sync_from_ctx, server::telemetry,
@@ -48,10 +49,20 @@ pub struct SystemInfo {
     has_emitted_memory_warning_event: bool,
     /// A circular buffer storing resource usage data.
     stats: StatsBuffer,
+    /// Last observed total GPU active time, used to calculate interval usage.
+    last_gpu_usage_sample: Option<GpuUsageSample>,
+    /// Average GPU usage over the most recent refresh interval.
+    gpu_usage: Option<f32>,
     /// A helper structure for reporting resource usage via telemetry events.
     resource_usage_reporter: ResourceUsageReporter,
     /// The long OS version.
     long_os_version: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct GpuUsageSample {
+    instant: Instant,
+    total_active_us: u64,
 }
 
 impl SystemInfo {
@@ -65,6 +76,8 @@ impl SystemInfo {
             system: sysinfo::System::new(),
             has_emitted_memory_warning_event: false,
             stats: Default::default(),
+            last_gpu_usage_sample: None,
+            gpu_usage: None,
             resource_usage_reporter: Default::default(),
             long_os_version: sysinfo::System::long_os_version(),
         };
@@ -121,6 +134,13 @@ impl SystemInfo {
         total_usage / 100.
     }
 
+    /// Returns the average GPU active time over the most recent refresh
+    /// interval. A value of `1.` means one GPU was active for the whole
+    /// interval.
+    pub fn gpu_usage(&self) -> Option<f32> {
+        self.gpu_usage
+    }
+
     pub fn long_os_version(&self) -> Option<&str> {
         self.long_os_version.as_deref()
     }
@@ -149,6 +169,7 @@ impl SystemInfo {
         self.stats.push(Sample {
             cpu: self.cpu_usage(),
         });
+        self.refresh_gpu_usage();
 
         let rss = self.used_memory();
         let footprint = self.memory_footprint();
@@ -159,6 +180,27 @@ impl SystemInfo {
         if self.stats.is_full() {
             self.resource_usage_reporter.maybe_send_report(ctx);
         }
+    }
+
+    fn refresh_gpu_usage(&mut self) {
+        let now = Instant::now();
+        let sample = GpuUsageSample {
+            instant: now,
+            total_active_us: render_diagnostics::total_gpu_active_us(),
+        };
+
+        if let Some(previous) = self.last_gpu_usage_sample {
+            let elapsed_us = now.duration_since(previous.instant).as_micros() as f32;
+            if elapsed_us > 0. {
+                let active_us = sample
+                    .total_active_us
+                    .saturating_sub(previous.total_active_us)
+                    as f32;
+                self.gpu_usage = Some(active_us / elapsed_us);
+            }
+        }
+
+        self.last_gpu_usage_sample = Some(sample);
     }
 
     /// Checks for excessive memory usage.  This may send a telemetry event

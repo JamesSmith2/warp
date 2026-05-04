@@ -18,6 +18,8 @@ use core::mem;
 use lazy_static::lazy_static;
 use num_traits::Float as _;
 use std::cmp::Ordering;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::{collections::HashMap, ops::RangeInclusive};
 use unicode_width::UnicodeWidthChar;
@@ -30,6 +32,7 @@ use warpui::geometry::rect::RectF;
 use warpui::geometry::vector::{vec2f, Vector2F};
 use warpui::image_cache::{AnimatedImageBehavior, CacheOption, FitType, Image, ImageCache};
 use warpui::platform::LineStyle;
+use warpui::scene::{TerminalSurface, TerminalSurfaceId};
 use warpui::text_layout::{Line, StyleAndFont, TextStyle, DEFAULT_TOP_BOTTOM_RATIO};
 use warpui::units::{IntoLines as _, Lines, Pixels};
 use warpui::{AppContext, Element, EntityId, PaintContext, Scene, SingletonEntity};
@@ -281,6 +284,195 @@ where
     None
 }
 
+fn hash_f32(value: f32, state: &mut DefaultHasher) {
+    value.to_bits().hash(state);
+}
+
+fn hash_color(color: Color, state: &mut DefaultHasher) {
+    match color {
+        Color::Named(named) => {
+            0_u8.hash(state);
+            (named as u8).hash(state);
+        }
+        Color::Spec(color) => {
+            1_u8.hash(state);
+            color.r.hash(state);
+            color.g.hash(state);
+            color.b.hash(state);
+            color.a.hash(state);
+        }
+        Color::Indexed(index) => {
+            2_u8.hash(state);
+            index.hash(state);
+        }
+    }
+}
+
+fn hash_cell(cell: &Cell, state: &mut DefaultHasher) {
+    match cell.raw_content() {
+        CharOrStr::Char(c) => {
+            0_u8.hash(state);
+            c.hash(state);
+        }
+        CharOrStr::Str(s) => {
+            1_u8.hash(state);
+            s.hash(state);
+        }
+    }
+    hash_color(cell.fg, state);
+    hash_color(cell.bg, state);
+    cell.flags.bits().hash(state);
+}
+
+fn hash_point_range(range: &RangeInclusive<Point>, state: &mut DefaultHasher) {
+    range.start().hash(state);
+    range.end().hash(state);
+}
+
+fn terminal_surface_id(
+    grid: &GridHandler,
+    start_row: usize,
+    end_row: usize,
+    grid_origin: Vector2F,
+    cell_size: Vector2F,
+    padding_x: Pixels,
+) -> TerminalSurfaceId {
+    let mut state = DefaultHasher::new();
+    (grid as *const GridHandler as usize).hash(&mut state);
+    start_row.hash(&mut state);
+    end_row.hash(&mut state);
+    grid.columns().hash(&mut state);
+    hash_f32(grid_origin.x(), &mut state);
+    hash_f32(grid_origin.y(), &mut state);
+    hash_f32(cell_size.x(), &mut state);
+    hash_f32(cell_size.y(), &mut state);
+    hash_f32(padding_x.as_f32(), &mut state);
+    TerminalSurfaceId(state.finish())
+}
+
+fn terminal_surface_rows(
+    grid: &GridHandler,
+    start_row: usize,
+    end_row: usize,
+    respect_displayed_output: bool,
+) -> Vec<usize> {
+    if respect_displayed_output {
+        if let Some(rows) = grid.displayed_output_rows() {
+            return rows
+                .skip(start_row)
+                .take(end_row.saturating_sub(start_row))
+                .collect();
+        }
+    }
+
+    (start_row..end_row).collect()
+}
+
+fn terminal_surface_row_hashes(grid: &GridHandler, visible_rows: &[usize]) -> Vec<u64> {
+    visible_rows
+        .iter()
+        .map(|&row_idx| {
+            let mut state = DefaultHasher::new();
+            row_idx.hash(&mut state);
+            grid.columns().hash(&mut state);
+            if let Some(row) = grid.row(row_idx) {
+                for col in 0..grid.columns() {
+                    hash_cell(&row[col], &mut state);
+                }
+            }
+            state.finish()
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_terminal_surface_metadata(
+    grid: &GridHandler,
+    start_row: usize,
+    end_row: usize,
+    cell_size: Vector2F,
+    padding_x: Pixels,
+    grid_origin: Vector2F,
+    alpha: u8,
+    highlighted_url: Option<&Link>,
+    link_tool_tip: Option<&Link>,
+    ordered_matches_present: bool,
+    focused_match_range: Option<&RangeInclusive<Point>>,
+    use_ligature_rendering: bool,
+    respect_displayed_output: bool,
+    image_metadata: &HashMap<u32, StoredImageMetadata>,
+    hide_cursor_cell: bool,
+    visible_cursor_shape: Option<CursorShape>,
+    ctx: &mut PaintContext,
+) {
+    if !warpui::render_diagnostics::enabled() {
+        return;
+    }
+
+    let visible_rows = terminal_surface_rows(grid, start_row, end_row, respect_displayed_output);
+    if visible_rows.is_empty() || grid.columns() == 0 {
+        return;
+    }
+
+    let mut visual_state = DefaultHasher::new();
+    alpha.hash(&mut visual_state);
+    use_ligature_rendering.hash(&mut visual_state);
+    hide_cursor_cell.hash(&mut visual_state);
+    visible_cursor_shape.hash(&mut visual_state);
+    grid.cursor_point().hash(&mut visual_state);
+    grid.cursor_render_point().hash(&mut visual_state);
+    if let Some(link) = highlighted_url {
+        hash_point_range(&link.range, &mut visual_state);
+    }
+    if let Some(link) = link_tool_tip {
+        hash_point_range(&link.range, &mut visual_state);
+    }
+    if let Some(range) = focused_match_range {
+        hash_point_range(range, &mut visual_state);
+    }
+
+    let has_dynamic_overlay = ordered_matches_present
+        || focused_match_range.is_some()
+        || highlighted_url.is_some()
+        || link_tool_tip.is_some()
+        || grid
+            .filter_matches()
+            .is_some_and(|filter_matches| !filter_matches.is_empty())
+        || grid.marked_text().is_some();
+
+    let fallback_reason = if use_ligature_rendering {
+        Some("ligatures")
+    } else if !image_metadata.is_empty() {
+        Some("terminal_images")
+    } else if has_dynamic_overlay {
+        Some("dynamic_terminal_overlay")
+    } else {
+        None
+    };
+
+    let mut surface_origin = grid_origin + vec2f(padding_x.as_f32(), 0.);
+    surface_origin.set_y(surface_origin.y().round());
+    let bounds = RectF::new(
+        surface_origin,
+        vec2f(
+            cell_size.x() * grid.columns() as f32,
+            cell_size.y() * visible_rows.len() as f32,
+        ),
+    );
+
+    ctx.scene.draw_terminal_surface(TerminalSurface {
+        id: terminal_surface_id(grid, start_row, end_row, grid_origin, cell_size, padding_x),
+        bounds,
+        cell_size,
+        columns: grid.columns(),
+        rows: start_row..end_row,
+        row_hashes: terminal_surface_row_hashes(grid, &visible_rows),
+        visual_state_hash: visual_state.finish(),
+        alpha,
+        fallback_reason,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_grid<'a>(
     grid: &GridHandler,
@@ -318,6 +510,25 @@ pub fn render_grid<'a>(
     // codepath (which is known to be less performant) if the font does not
     // even support ligatures.
     let respect_displayed_output = matches!(respect_displayed_output, RespectDisplayedOutput::Yes);
+    submit_terminal_surface_metadata(
+        grid,
+        start_row,
+        end_row,
+        cell_size,
+        padding_x,
+        grid_origin,
+        alpha,
+        highlighted_url,
+        link_tool_tip,
+        ordered_matches.is_some(),
+        focused_match_range,
+        use_ligature_rendering,
+        respect_displayed_output,
+        image_metadata,
+        hide_cursor_cell,
+        visible_cursor_shape,
+        ctx,
+    );
     match (use_ligature_rendering, grid.displayed_output_rows()) {
         (true, Some(rows)) if respect_displayed_output => {
             let visible_rows = rows.skip(start_row).take(end_row.saturating_sub(start_row));

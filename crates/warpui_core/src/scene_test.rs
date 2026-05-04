@@ -69,3 +69,32 @@ fn test_click_through_layer_does_not_cover_lower_layers() {
 
     assert!(!scene.is_covered(Point::new(10., 10., ZIndex::new(0))));
 }
+
+#[test]
+fn terminal_surface_records_on_active_layer_and_hit_map() {
+    let mut scene = Scene::new(1., rendering::Config::default());
+    let bounds = RectF::new(vec2f(0., 0.), vec2f(80., 40.));
+
+    scene.draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 10.)));
+    scene.start_layer(ClipBounds::ActiveLayer);
+    scene.draw_terminal_surface(TerminalSurface {
+        id: TerminalSurfaceId(7),
+        bounds,
+        cell_size: vec2f(8., 16.),
+        columns: 10,
+        rows: 0..2,
+        row_hashes: vec![11, 12],
+        visual_state_hash: 13,
+        alpha: 255,
+        fallback_reason: None,
+    });
+
+    assert_eq!(scene.terminal_surface_count(), 1);
+    assert_eq!(scene.active_layer().terminal_surfaces.len(), 1);
+    assert!(scene
+        .active_layer()
+        .terminal_surfaces
+        .iter()
+        .any(|surface| surface.id == TerminalSurfaceId(7)));
+    assert!(scene.is_covered(Point::new(1., 1., ZIndex::new(0))));
+}

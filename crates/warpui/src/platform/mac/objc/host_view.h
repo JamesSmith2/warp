@@ -11,6 +11,7 @@
 - (WarpHostView *)initWithFrame:(NSRect)frame
                     metalDevice:(id)metalDevice
              enableTitlebarDrag:(BOOL)enableTitlebarDrag
+                          opaque:(BOOL)opaque
                        testMode:(BOOL)testMode;
 - (void)setAsyncCallback:(BOOL)shouldAsync;
 - (BOOL)keyDownImpl:(NSEvent *)event;

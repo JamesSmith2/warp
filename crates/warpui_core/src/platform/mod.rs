@@ -101,6 +101,7 @@ pub struct WindowOptions {
     pub style: WindowStyle,
     pub background_blur_radius_pixels: Option<u8>,
     pub background_blur_texture: bool,
+    pub opaque: bool,
     pub gpu_power_preference: GPUPowerPreference,
     pub backend_preference: Option<GraphicsBackend>,
     pub on_gpu_device_info_reported: Box<OnGPUDeviceSelected>,
@@ -123,6 +124,7 @@ impl std::fmt::Debug for WindowOptions {
                 &self.background_blur_radius_pixels,
             )
             .field("background_blur_texture", &self.background_blur_texture)
+            .field("opaque", &self.opaque)
             .field("gpu_power_preference", &self.gpu_power_preference)
             .field("backend_preference", &self.backend_preference)
             .field("window_instance", &self.window_instance)

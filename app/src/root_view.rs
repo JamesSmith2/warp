@@ -619,8 +619,12 @@ pub fn create_transferred_window(
             window_style,
             window_bounds,
             title: Some(WINDOW_TITLE.to_owned()),
-            background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
+            background_blur_radius_pixels: Some(effective_background_blur_radius_pixels(
+                window_settings,
+                ctx,
+            )),
             background_blur_texture: *window_settings.background_blur_texture,
+            opaque: uses_opaque_window_surface(window_settings, ctx),
             on_gpu_driver_selected: on_gpu_driver_selected_callback(),
             ..Default::default()
         },
@@ -679,11 +683,15 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
     if let Some(app_state) = &arg.app_state {
         maybe_register_global_window_shortcuts(global_resource_handles.clone(), ctx);
 
-        let (background_blur_radius_pixels, background_blur_texture) = {
+        let (background_blur_radius_pixels, background_blur_texture, opaque) = {
             let window_settings = WindowSettings::as_ref(ctx);
             (
-                Some(*window_settings.background_blur_radius),
+                Some(effective_background_blur_radius_pixels(
+                    window_settings,
+                    ctx,
+                )),
                 *window_settings.background_blur_texture,
+                uses_opaque_window_surface(window_settings, ctx),
             )
         };
 
@@ -716,6 +724,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                             fullscreen_state: window.fullscreen_state,
                             background_blur_radius_pixels,
                             background_blur_texture,
+                            opaque,
                             // Don't use the quake window for positioning new windows.
                             anchor_new_windows_from_closed_position:
                                 NextNewWindowsHasThisWindowsBoundsUponClose::No,
@@ -759,6 +768,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                                 fullscreen_state: window.fullscreen_state,
                                 background_blur_radius_pixels,
                                 background_blur_texture,
+                                opaque,
                                 on_gpu_driver_selected: on_gpu_driver_selected_callback(),
                                 ..Default::default()
                             },
@@ -811,6 +821,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         fullscreen_state: window.fullscreen_state,
                         background_blur_radius_pixels,
                         background_blur_texture,
+                        opaque,
                         on_gpu_driver_selected: on_gpu_driver_selected_callback(),
                         ..Default::default()
                     },
@@ -1180,10 +1191,33 @@ fn default_window_options(window_settings: &WindowSettings, ctx: &AppContext) ->
         window_style,
         window_bounds: next_bounds,
         title: Some("Warp".to_owned()),
-        background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
+        background_blur_radius_pixels: Some(effective_background_blur_radius_pixels(
+            window_settings,
+            ctx,
+        )),
         background_blur_texture: *window_settings.background_blur_texture,
+        opaque: uses_opaque_window_surface(window_settings, ctx),
         on_gpu_driver_selected: on_gpu_driver_selected_callback(),
         ..Default::default()
+    }
+}
+
+fn uses_opaque_window_surface(window_settings: &WindowSettings, ctx: &AppContext) -> bool {
+    *window_settings.background_opacity == 100
+        && effective_background_blur_radius_pixels(window_settings, ctx) == 0
+        && Appearance::as_ref(ctx).theme().background_image().is_none()
+}
+
+fn effective_background_blur_radius_pixels(
+    window_settings: &WindowSettings,
+    ctx: &AppContext,
+) -> u8 {
+    if *window_settings.background_opacity == 100
+        && Appearance::as_ref(ctx).theme().background_image().is_none()
+    {
+        0
+    } else {
+        *window_settings.background_blur_radius
     }
 }
 
@@ -1365,8 +1399,12 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
                     window_style: WindowStyle::Pin,
                     window_bounds: WindowBounds::ExactPosition(config.window_bounds),
                     title: Some("Warp".to_owned()),
-                    background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
+                    background_blur_radius_pixels: Some(effective_background_blur_radius_pixels(
+                        window_settings,
+                        ctx,
+                    )),
                     background_blur_texture: *window_settings.background_blur_texture,
+                    opaque: uses_opaque_window_surface(window_settings, ctx),
                     // Ignore the quake window for positioning the next window
                     anchor_new_windows_from_closed_position:
                         warpui::NextNewWindowsHasThisWindowsBoundsUponClose::No,

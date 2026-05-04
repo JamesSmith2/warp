@@ -60,8 +60,12 @@ const TAB_INDICATOR_HEIGHT: f32 = 14.0;
 pub fn uses_vertical_tabs(ctx: &AppContext) -> bool {
     FeatureFlag::VerticalTabs.is_enabled()
         && *TabSettings::as_ref(ctx).use_vertical_tabs
-        && !(FeatureFlag::WindowWorkspaceGroups.is_enabled()
-            && *TabSettings::as_ref(ctx).use_window_workspace_groups)
+        && !uses_window_workspace_groups(ctx)
+}
+
+pub fn uses_window_workspace_groups(ctx: &AppContext) -> bool {
+    FeatureFlag::WindowWorkspaceGroups.is_enabled()
+        && *TabSettings::as_ref(ctx).use_window_workspace_groups
 }
 
 const WARP_2_TAB_COLOR_OPACITY: Opacity = 25;
@@ -385,7 +389,10 @@ impl TabData {
         let mut menu_items = vec![];
         let uses_vertical_tabs = uses_vertical_tabs(ctx);
 
-        if ContextFlag::CloseWindow.is_enabled() || tabs_len != 1 {
+        if ContextFlag::CloseWindow.is_enabled()
+            || tabs_len != 1
+            || uses_window_workspace_groups(ctx)
+        {
             menu_items.push(
                 MenuItemFields::new("Close tab")
                     .with_on_select_action(WorkspaceAction::CloseTab(index))
@@ -604,6 +611,7 @@ pub struct TabComponent<'a> {
     tooltip_git_branch: Option<String>,
     is_drag_target: bool,
     background_opacity: u8,
+    can_close_last_tab: bool,
     /// Set to `true` when this `TabComponent` is being rendered inside the
     /// floating chip overlay used during a cross-window tab drag. In that
     /// mode `build()` skips the outer `SavePosition`, `Draggable`, and
@@ -768,6 +776,7 @@ impl<'a> TabComponent<'a> {
             tooltip_git_branch,
             is_drag_target,
             background_opacity,
+            can_close_last_tab: uses_window_workspace_groups(ctx),
             for_drag_ghost: false,
         }
     }
@@ -1004,7 +1013,7 @@ impl<'a> TabComponent<'a> {
     ) -> Box<dyn Element> {
         let should_render = {
             let is_last_tab = self.tab_bar.tab_count == 1;
-            ContextFlag::CloseWindow.is_enabled() || !is_last_tab
+            ContextFlag::CloseWindow.is_enabled() || !is_last_tab || self.can_close_last_tab
         };
         let button = if is_hovered && should_render {
             let tab_index = self.tab_index;
@@ -1496,6 +1505,7 @@ impl UiComponent for TabComponent<'_> {
         let tab_index = self.tab_index;
         let is_tab_being_renamed = self.is_tab_being_renamed();
         let is_last_tab = self.tab_bar.tab_count == 1;
+        let can_close_last_tab = self.can_close_last_tab;
         let hover_fixed_width = self.tab_bar.hover_fixed_width;
         let is_any_tab_dragging = self.tab_bar.is_any_tab_dragging;
         let draggable_state = self.tab.draggable_state.clone();
@@ -1666,7 +1676,7 @@ impl UiComponent for TabComponent<'_> {
             });
         });
 
-        if ContextFlag::CloseWindow.is_enabled() || !is_last_tab {
+        if ContextFlag::CloseWindow.is_enabled() || !is_last_tab || can_close_last_tab {
             tab = tab.on_middle_click(move |ctx, _app, _position| {
                 ctx.dispatch_typed_action(WorkspaceAction::CloseTab(tab_index));
             });

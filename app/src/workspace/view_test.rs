@@ -43,6 +43,8 @@ use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings::PrivacySettings;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::settings_view::DisplayCount;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::system::SystemInfo;
 use crate::system::SystemStats;
 use crate::tab_configs::tab_config::{TabConfigPaneNode, TabConfigPaneType};
 use crate::terminal::history::History;
@@ -97,6 +99,8 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(|ctx| AutoupdateState::new(ServerApiProvider::as_ref(ctx).get()));
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| SystemStats::new());
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    app.add_singleton_model(SystemInfo::new);
     app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(CloudModel::mock);
     app.add_singleton_model(UserWorkspaces::default_mock);
@@ -2562,6 +2566,47 @@ fn test_window_workspace_groups_scope_visible_tabs() {
 
             workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(0), ctx);
 
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.tab_count(), 1);
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_close_last_tab_replaces_session() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert_eq!(workspace.tab_count(), 1);
+
+            let old_pane_group_id = workspace.get_pane_group_view(0).unwrap().id();
+
+            workspace.handle_action(&WorkspaceAction::CloseActiveTab, ctx);
+
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(
+                workspace.get_pane_group_view(0).unwrap().id(),
+                old_pane_group_id
+            );
+
+            workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(0), ctx);
+            assert_eq!(workspace.workspace_group_count(), 2);
             assert_eq!(workspace.active_workspace_group_index(), 0);
             assert_eq!(workspace.tab_count(), 1);
         });

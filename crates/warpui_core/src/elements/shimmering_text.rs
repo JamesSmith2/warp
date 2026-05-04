@@ -270,9 +270,17 @@ impl Element for ShimmeringTextElement {
             return;
         };
 
-        ctx.repaint_after(Duration::from_millis(REPAINT_DURATION));
-
         let bounds = RectF::from_points(origin, origin + size);
+        let visible = ctx
+            .scene
+            .visible_rect(Point::from_vec2f(origin, ctx.scene.z_index()), size)
+            .is_some();
+        if visible {
+            ctx.repaint_after_with_source(
+                Duration::from_millis(REPAINT_DURATION),
+                "shimmering_text",
+            );
+        }
         let style_overrides = self.build_color_overrides();
 
         line.paint(

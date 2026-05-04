@@ -44,6 +44,9 @@ void warp_marked_text_cleared(WarpHostView *);
     // Whether we are in test mode, which suppresses drawing.
     BOOL testMode;
 
+    // Whether the backing Metal layer can opt out of alpha composition.
+    BOOL layerOpaque;
+
     // The metal device for our layer.
     id metalDevice;
 
@@ -261,13 +264,14 @@ void warp_marked_text_cleared(WarpHostView *);
     layer.needsDisplayOnBoundsChange = YES;
     layer.presentsWithTransaction = YES;
     layer.delegate = self;
-    layer.opaque = NO;
+    layer.opaque = layerOpaque;
     return layer;
 }
 
 - (WarpHostView *)initWithFrame:(NSRect)frame
                     metalDevice:(id)device
              enableTitlebarDrag:(BOOL)enableTitlebarDrag
+                          opaque:(BOOL)opaqueFlag
                        testMode:(BOOL)testModeFlag {
     NSAssert(testModeFlag || device, @"Nil metal device not in test mode");
     [super initWithFrame:frame];
@@ -277,6 +281,7 @@ void warp_marked_text_cleared(WarpHostView *);
         NSPasteboardTypeFileURL,
     ]];
     self->testMode = testModeFlag;
+    self->layerOpaque = opaqueFlag;
     self->titlebarDragEnabled = enableTitlebarDrag;
     self->metalDevice = [device retain];
     self->markedText = [[NSMutableAttributedString alloc] init];

@@ -11,6 +11,7 @@ use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;
 use rstar::{primitives::Rectangle, RTree};
+use std::ops::Range;
 use std::sync::Arc;
 use vec1::{vec1, Vec1};
 
@@ -34,6 +35,7 @@ pub struct Layer {
     pub images: Vec<Image>,
     pub glyphs: Vec<Glyph>,
     pub icons: Vec<Icon>,
+    pub terminal_surfaces: Vec<TerminalSurface>,
     pub click_through: bool,
 }
 
@@ -119,6 +121,22 @@ pub struct Icon {
     pub asset: Arc<StaticImage>,
     pub opacity: f32,
     pub color: ColorU,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TerminalSurfaceId(pub u64);
+
+#[derive(Clone, Debug)]
+pub struct TerminalSurface {
+    pub id: TerminalSurfaceId,
+    pub bounds: RectF,
+    pub cell_size: Vector2F,
+    pub columns: usize,
+    pub rows: Range<usize>,
+    pub row_hashes: Vec<u64>,
+    pub visual_state_hash: u64,
+    pub alpha: u8,
+    pub fallback_reason: Option<&'static str>,
 }
 
 // These were picked empirically to make the shadows look decent by
@@ -642,6 +660,18 @@ impl Scene {
         layer.record_hit_rect(rect);
     }
 
+    pub fn draw_terminal_surface(&mut self, surface: TerminalSurface) {
+        #[cfg(debug_assertions)]
+        let location = self.panic_location.take();
+        #[cfg(not(debug_assertions))]
+        let location = None;
+        Self::validate_rect(&surface.bounds, location);
+
+        let layer = self.active_layer();
+        layer.record_hit_rect(surface.bounds);
+        layer.terminal_surfaces.push(surface);
+    }
+
     /// Adds a glyph that should be drawn in the scene.
     ///
     /// `position` is the point at which the glyph's left edge meets the
@@ -672,6 +702,12 @@ impl Scene {
     /// Get an iterator over all layers in order, from bottom to top
     pub fn layers(&self) -> impl Iterator<Item = &Layer> {
         self.layers.iter().chain(self.overlay_layers.iter())
+    }
+
+    pub fn terminal_surface_count(&self) -> usize {
+        self.layers()
+            .map(|layer| layer.terminal_surfaces.len())
+            .sum()
     }
 
     /// Get the total number of layers

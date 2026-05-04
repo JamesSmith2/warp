@@ -2,6 +2,7 @@ use crate::rendering::atlas::{AllocatedRegion, TextureId};
 use crate::rendering::{get_best_dash_gap, GlyphCache, GlyphRasterBoundsFn, RasterizeGlyphFn};
 use warpui_core::{
     fonts::{self, SubpixelAlignment},
+    render_diagnostics::{self, RenderDiagnosticEvent},
     rendering::{self, texture_cache::TextureCache},
 };
 
@@ -22,20 +23,23 @@ use pathfinder_geometry::{
     vector::{vec2f, Vector2F},
 };
 use warpui_core::fonts::{canvas, RasterizedGlyph};
-use warpui_core::scene::{CornerRadius, GlyphFade, Icon, Image, Layer, Scene};
+use warpui_core::scene::{CornerRadius, GlyphFade, Icon, Image, Layer, Scene, TerminalSurfaceId};
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use pathfinder_geometry::rect::RectI;
 use std::{fs::File, mem, sync::Once};
 use std::{io::Write, os::raw::c_void};
 use warpui_core::scene::GlyphKey;
+use warpui_core::WindowId;
 
 const METAL_LIB_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
 static WRITE_LIB_TO_FILE: Once = Once::new();
 
 /// A structure to help manage a single rendering pass.
 struct RenderPass<'a> {
+    window_id: WindowId,
     drawable: &'a metal::MetalDrawableRef,
     buffer: &'a metal::CommandBufferRef,
     encoder: &'a metal::RenderCommandEncoderRef,
@@ -44,12 +48,15 @@ struct RenderPass<'a> {
 
 impl<'a> RenderPass<'a> {
     fn new(
+        window_id: WindowId,
         command_queue: &'a mut metal::CommandQueue,
         drawable: &'a metal::MetalDrawableRef,
+        opaque: bool,
     ) -> Self {
         let buffer = command_queue.new_command_buffer();
-        let encoder = buffer.new_render_command_encoder(Self::create_descriptor(drawable));
+        let encoder = buffer.new_render_command_encoder(Self::create_descriptor(drawable, opaque));
         Self {
+            window_id,
             drawable,
             buffer,
             encoder,
@@ -72,11 +79,34 @@ impl<'a> RenderPass<'a> {
 
         self.encoding_finished = true;
 
+        render_diagnostics::record_event(
+            self.window_id,
+            RenderDiagnosticEvent::CommandBufferCommit,
+        );
+        let window_id = self.window_id;
+        let gpu_timing_block =
+            block::ConcreteBlock::new(move |command_buffer: &metal::CommandBufferRef| {
+                let gpu_start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
+                let gpu_end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                if gpu_start.is_finite() && gpu_end.is_finite() && gpu_end > gpu_start {
+                    render_diagnostics::record_gpu_active_duration(
+                        window_id,
+                        Duration::from_secs_f64(gpu_end - gpu_start),
+                    );
+                }
+            })
+            .copy();
+        self.buffer.add_completed_handler(&gpu_timing_block);
         self.buffer.commit();
 
-        self.buffer.wait_until_completed();
-
         let captured = if should_capture {
+            let wait_started = Instant::now();
+            self.buffer.wait_until_completed();
+            render_diagnostics::record_duration(
+                self.window_id,
+                RenderDiagnosticEvent::CommandBufferWait,
+                wait_started.elapsed(),
+            );
             let texture = self.drawable.texture();
             capture_frame(texture, drawable_size)
         } else {
@@ -88,7 +118,10 @@ impl<'a> RenderPass<'a> {
     }
 
     /// Creates a descriptor for a pass that renders into the provided drawable.
-    fn create_descriptor(drawable: &metal::MetalDrawableRef) -> &metal::RenderPassDescriptorRef {
+    fn create_descriptor(
+        drawable: &metal::MetalDrawableRef,
+        opaque: bool,
+    ) -> &metal::RenderPassDescriptorRef {
         let descriptor = metal::RenderPassDescriptor::new();
 
         let color_attachment = descriptor.color_attachments().object_at(0).expect(
@@ -97,7 +130,12 @@ impl<'a> RenderPass<'a> {
         color_attachment.set_texture(Some(drawable.texture()));
         color_attachment.set_load_action(metal::MTLLoadAction::Clear);
         color_attachment.set_store_action(metal::MTLStoreAction::Store);
-        color_attachment.set_clear_color(metal::MTLClearColor::new(0., 0., 0., 0.));
+        color_attachment.set_clear_color(metal::MTLClearColor::new(
+            0.,
+            0.,
+            0.,
+            if opaque { 1. } else { 0. },
+        ));
 
         descriptor
     }
@@ -122,6 +160,12 @@ struct Resources {
     quad_indices: metal::Buffer,
     glyph_cache: GlyphCache<metal::Texture>,
     texture_cache: TextureCache<metal::Texture>,
+    terminal_surface_cache: HashMap<TerminalSurfaceId, TerminalSurfaceCacheEntry>,
+}
+
+struct TerminalSurfaceCacheEntry {
+    row_hashes: Vec<u64>,
+    visual_state_hash: u64,
 }
 
 /// A structure that manages rendering scenes using a particular hardware
@@ -205,6 +249,7 @@ impl Renderer {
                 quad_indices,
                 glyph_cache,
                 texture_cache: TextureCache::new(),
+                terminal_surface_cache: HashMap::new(),
             },
             command_queue: device.new_command_queue(),
         }
@@ -236,6 +281,7 @@ impl Renderer {
 
     fn render(
         &mut self,
+        window_id: WindowId,
         scene: &Scene,
         ctx: &MetalDrawContext,
         should_capture: bool,
@@ -244,7 +290,8 @@ impl Renderer {
             .glyph_cache
             .update_config(&scene.rendering_config().glyphs);
 
-        let render_pass = RenderPass::new(&mut self.command_queue, ctx.drawable);
+        let render_pass =
+            RenderPass::new(window_id, &mut self.command_queue, ctx.drawable, ctx.opaque);
 
         Frame::new(scene, render_pass.encoder, &mut self.resources, ctx).draw();
 
@@ -317,9 +364,66 @@ impl<'a> Frame<'a> {
                         height: self.ctx.drawable_size.y() as u64,
                     });
             }
+            self.record_terminal_surfaces(layer);
             self.draw_rects(layer);
             self.draw_images(layer);
             self.draw_glyphs(layer);
+        }
+    }
+
+    fn record_terminal_surfaces(&mut self, layer: &Layer) {
+        for surface in &layer.terminal_surfaces {
+            render_diagnostics::record_count(
+                self.ctx.window_id,
+                RenderDiagnosticEvent::TerminalSurfaceSubmitted,
+                1,
+            );
+            render_diagnostics::record_count(
+                self.ctx.window_id,
+                RenderDiagnosticEvent::TerminalSurfaceRows,
+                surface.row_hashes.len() as u64,
+            );
+
+            let previous = self.resources.terminal_surface_cache.get(&surface.id);
+            let force_full_dirty = surface.fallback_reason.is_some()
+                || previous.is_none_or(|previous| {
+                    previous.visual_state_hash != surface.visual_state_hash
+                        || previous.row_hashes.len() != surface.row_hashes.len()
+                });
+            let dirty_rows = if force_full_dirty {
+                surface.row_hashes.len()
+            } else {
+                previous
+                    .map(|previous| {
+                        previous
+                            .row_hashes
+                            .iter()
+                            .zip(surface.row_hashes.iter())
+                            .filter(|(before, after)| before != after)
+                            .count()
+                    })
+                    .unwrap_or(surface.row_hashes.len())
+            };
+
+            if surface.fallback_reason.is_some() {
+                render_diagnostics::record_event(
+                    self.ctx.window_id,
+                    RenderDiagnosticEvent::TerminalSurfaceFullFallback,
+                );
+            }
+            render_diagnostics::record_count(
+                self.ctx.window_id,
+                RenderDiagnosticEvent::TerminalSurfaceDirtyRows,
+                dirty_rows as u64,
+            );
+
+            self.resources.terminal_surface_cache.insert(
+                surface.id,
+                TerminalSurfaceCacheEntry {
+                    row_hashes: surface.row_hashes.clone(),
+                    visual_state_hash: surface.visual_state_hash,
+                },
+            );
         }
     }
 
@@ -917,9 +1021,11 @@ mod shader {
 }
 
 pub(super) struct MetalDrawContext<'a> {
+    pub(super) window_id: WindowId,
     pub(super) device: &'a metal::Device,
     pub(super) drawable: &'a metal::MetalDrawableRef,
     pub(super) drawable_size: Vector2F,
+    pub(super) opaque: bool,
     rasterize_glyph_fn: &'a RasterizeGlyphFn<'a>,
     glyph_raster_bounds_fn: &'a GlyphRasterBoundsFn<'a>,
 }
@@ -959,17 +1065,25 @@ impl super::super::Renderer for Renderer {
             return;
         };
 
+        let next_drawable_started = Instant::now();
         let drawable = unsafe {
             let native_view = window.native_view();
             let layer: id = msg_send![native_view, layer];
             let drawable: &metal::MetalDrawableRef = msg_send![layer, nextDrawable];
             drawable
         };
+        render_diagnostics::record_duration(
+            window.id(),
+            RenderDiagnosticEvent::NextDrawable,
+            next_drawable_started.elapsed(),
+        );
 
         let ctx = &MetalDrawContext {
+            window_id: window.id(),
             device: metal_device,
             drawable,
             drawable_size: window.physical_size(),
+            opaque: window.opaque(),
             rasterize_glyph_fn: &|glyph_key, scale, subpixel_alignment, glyph_config, format| {
                 font_cache.rasterized_glyph(
                     glyph_key,
@@ -986,7 +1100,8 @@ impl super::super::Renderer for Renderer {
 
         let capture_callback = window.capture_callback.borrow_mut().take();
         let should_capture = capture_callback.is_some();
-        let captured = Self::render(self, scene, ctx, should_capture);
+        let captured = Self::render(self, window.id(), scene, ctx, should_capture);
+        render_diagnostics::record_event(window.id(), RenderDiagnosticEvent::Present);
         if let (Some(frame), Some(callback)) = (captured, capture_callback) {
             callback(frame);
         }

@@ -83,6 +83,8 @@ use crate::notification::NotificationContext;
 use crate::pane_group::pane::ActionOrigin;
 use crate::projects::ProjectManagementModel;
 use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::system::{SystemInfo, SystemInfoEvent};
 use crate::terminal::enable_auto_reload_modal::{
     EnableAutoReloadModal, EnableAutoReloadModalEvent,
 };
@@ -466,8 +468,9 @@ use crate::palette::PaletteMode;
 use crate::search::command_palette::view::{Event as CommandPaletteEvent, View as CommandPalette};
 use crate::server::telemetry::{NotificationsTurnedOnSource, PaletteSource, TabRenameEvent};
 use crate::tab::{
-    tab_position_id, uses_vertical_tabs, NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor,
-    TabBarState, TabComponent, TabData, TabTelemetryAction, TAB_BAR_BORDER_HEIGHT,
+    tab_position_id, uses_vertical_tabs, uses_window_workspace_groups, NewSessionMenuItem,
+    PaneNameMenuTarget, SelectedTabColor, TabBarState, TabComponent, TabData, TabTelemetryAction,
+    TAB_BAR_BORDER_HEIGHT,
 };
 use crate::terminal::view::ssh_file_upload::FileUploadId;
 use crate::ui_components::icons;
@@ -2670,6 +2673,12 @@ impl Workspace {
             &NetworkStatus::handle(ctx),
             Self::handle_network_status_event,
         );
+        #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+        ctx.subscribe_to_model(&SystemInfo::handle(ctx), |_, _, event, ctx| {
+            if matches!(event, SystemInfoEvent::Refreshed) {
+                ctx.notify();
+            }
+        });
 
         let palette =
             ctx.add_typed_action_view(|ctx| CommandPalette::new(NavigationMode::Normal, ctx));
@@ -5272,8 +5281,7 @@ impl Workspace {
     }
 
     fn workspace_groups_enabled(app: &AppContext) -> bool {
-        FeatureFlag::WindowWorkspaceGroups.is_enabled()
-            && *TabSettings::as_ref(app).use_window_workspace_groups
+        uses_window_workspace_groups(app)
     }
 
     fn vertical_tabs_enabled_without_workspace_groups(app: &AppContext) -> bool {
@@ -5577,6 +5585,10 @@ impl Workspace {
 
     /// This is meant to be dispatched directly by actions.
     pub fn activate_tab(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        if index == self.active_tab_index {
+            return;
+        }
+
         self.activate_tab_internal(index, ctx);
         ctx.notify();
     }
@@ -5585,6 +5597,14 @@ impl Workspace {
     /// view's state. It's not meant to be invoked directly by an action.
     pub fn activate_tab_internal(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
         if index < self.tab_count() {
+            let active_tab_changed = index != self.active_tab_index;
+            if active_tab_changed {
+                render_diagnostics::record_repaint_source(
+                    ctx.window_id(),
+                    "workspace_activate_tab",
+                );
+            }
+
             // If the command palette is open when the tab is switched using a keybinding,
             // we want to close the palette so that we don't get into a state where the palette
             // is open but doesn't have focus.
@@ -10939,6 +10959,36 @@ impl Workspace {
         }
     }
 
+    fn replace_last_workspace_group_tab(
+        &mut self,
+        index: usize,
+        add_to_undo_stack: bool,
+        detach_panes_for_close: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        debug_assert_eq!(self.tabs.len(), 1);
+        if index != 0 {
+            debug_assert!(false, "Tried to replace an invalid last-tab index");
+            return;
+        }
+
+        self.add_new_session_tab_with_default_mode(
+            NewSessionSource::Tab,
+            Some(ctx.window_id()),
+            None,
+            None,
+            false,
+            ctx,
+        );
+
+        if self.tabs.len() == 1 {
+            debug_assert!(false, "Failed to create replacement tab");
+            return;
+        }
+
+        self.remove_tab(index, add_to_undo_stack, detach_panes_for_close, ctx);
+    }
+
     fn remove_tab(
         &mut self,
         index: usize,
@@ -10946,26 +10996,41 @@ impl Workspace {
         detach_panes_for_close: bool,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(tab_data) = self.tabs.get(index) else {
+        let Some(pane_group_id) = self.tabs.get(index).map(|tab| tab.pane_group.id()) else {
             debug_assert!(false, "Tried to remove a tab with an invalid index");
             return;
         };
 
         // If the vertical-tabs detail sidecar is anchored to this tab's pane group, clear it.
         // Otherwise it will try to position itself against a pane row that is about to disappear
-        // (either because the tab is being removed from `self.tabs`, or because we're about to
-        // close the window for the last tab).
+        // (either because the tab is being removed from `self.tabs`, replaced, or because we're
+        // about to close the window for the last tab).
         self.vertical_tabs_panel
-            .clear_detail_sidecar_if_for_pane_group(tab_data.pane_group.id());
+            .clear_detail_sidecar_if_for_pane_group(pane_group_id);
 
         // If this is the last tab, close the window instead of actually removing
-        // the tab.
+        // the tab. Workspace groups keep the window alive by replacing the tab.
         if self.tabs.len() == 1 {
+            if Self::workspace_groups_enabled(ctx) {
+                self.replace_last_workspace_group_tab(
+                    index,
+                    add_to_undo_stack,
+                    detach_panes_for_close,
+                    ctx,
+                );
+                return;
+            }
+
             if ContextFlag::CloseWindow.is_enabled() {
                 ctx.close_window();
             }
             return;
         }
+
+        let Some(tab_data) = self.tabs.get(index) else {
+            debug_assert!(false, "Tried to remove a tab with an invalid index");
+            return;
+        };
 
         if detach_panes_for_close {
             let working_directories_model = self.working_directories_model.clone();
@@ -11018,9 +11083,10 @@ impl Workspace {
     }
 
     fn should_confirm_close_session(&self, ctx: &mut ViewContext<Self>) -> bool {
-        // If we're closing the only remaining tab, we're actually going to close the window.
-        // We don't need a user confirmation here because there's already another one on window close.
-        if self.tab_count() == 1 {
+        // If we're closing the only remaining non-workspace tab, we're actually going to close
+        // the window. We don't need a user confirmation here because there's already another one
+        // on window close.
+        if self.tab_count() == 1 && !Self::workspace_groups_enabled(ctx) {
             return false;
         }
         // TODO: remove session sharing flag check when long-running commands are included
@@ -11143,14 +11209,20 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let is_last_tab = self.tabs.len() == 1;
-        if !ContextFlag::CloseWindow.is_enabled() && is_last_tab {
+        let replaces_last_workspace_group_tab = is_last_tab && Self::workspace_groups_enabled(ctx);
+        if !ContextFlag::CloseWindow.is_enabled()
+            && is_last_tab
+            && !replaces_last_workspace_group_tab
+        {
             return;
         }
 
         let tabs_closed = self.close_tabs(
             vec![index].into_iter(),
             OpenDialogSource::CloseTab { tab_index: index },
-            skip_confirmation || is_last_tab, // If this is the last tab, the confirmation dialog will be handled by the window close.
+            // If this is the window's last tab, the confirmation dialog will be handled by the
+            // window close.
+            skip_confirmation || (is_last_tab && !replaces_last_workspace_group_tab),
             add_to_undo_stack,
             ctx,
         );
@@ -22636,6 +22708,9 @@ impl View for Workspace {
 
         if ContextFlag::CloseWindow.is_enabled() {
             context.set.insert("Workspace_CloseWindow");
+        }
+        if Self::workspace_groups_enabled(app) {
+            context.set.insert("Workspace_WorkspaceGroups");
         }
 
         match self.tab_count() {

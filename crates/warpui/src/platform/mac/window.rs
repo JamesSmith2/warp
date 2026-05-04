@@ -31,6 +31,7 @@ use warpui_core::platform::{
     TerminationMode, WindowFocusBehavior,
 };
 use warpui_core::r#async::Timer;
+use warpui_core::render_diagnostics::{self, RenderDiagnosticEvent};
 use warpui_core::rendering::GPUPowerPreference;
 use warpui_core::windowing::WindowCallbacks;
 use warpui_core::{
@@ -432,6 +433,7 @@ extern "C" {
         metalDevice: id,
         hideTitleBar: BOOL,
         backgroundBlurRadiusPixels: u8,
+        opaque: BOOL,
         testMode: BOOL,
     ) -> id;
     fn create_warp_nspanel(
@@ -439,6 +441,7 @@ extern "C" {
         metalDevice: id,
         hideTitleBar: BOOL,
         backgroundBlurRadiusPixels: u8,
+        opaque: BOOL,
         testMode: BOOL,
     ) -> id;
     fn is_warp_window(window: id) -> BOOL;
@@ -484,6 +487,8 @@ pub struct WindowState {
     window_id: WindowId,
     callbacks: WindowCallbacks,
     next_scene: RefCell<Option<Rc<Scene>>>,
+    display_pending: Cell<bool>,
+    opaque: bool,
     device: Option<Device>,
     renderer_manager: Option<Rc<RefCell<RendererManager>>>,
     synthetic_drag_counter: Cell<usize>,
@@ -554,6 +559,7 @@ impl Window {
                         options
                             .background_blur_radius_pixels
                             .unwrap_or(DEFAULT_WINDOW_BACKGROUND_BLUR_RADIUS),
+                        options.opaque as BOOL,
                         test_mode as BOOL,
                     );
 
@@ -567,6 +573,7 @@ impl Window {
                     options
                         .background_blur_radius_pixels
                         .unwrap_or(DEFAULT_WINDOW_BACKGROUND_BLUR_RADIUS),
+                    options.opaque as BOOL,
                     test_mode as BOOL,
                 ),
             };
@@ -597,6 +604,8 @@ impl Window {
                 window_id,
                 callbacks,
                 next_scene: Default::default(),
+                display_pending: Cell::new(false),
+                opaque: options.opaque,
                 renderer_manager: Some(renderer_manager),
                 device,
                 synthetic_drag_counter: Cell::new(0),
@@ -1071,6 +1080,10 @@ impl WindowState {
         self.device.as_ref()
     }
 
+    pub fn opaque(&self) -> bool {
+        self.opaque
+    }
+
     fn has_window_buttons(&self) -> bool {
         unsafe {
             // Use the close button as a proxy, since we modify all standard buttons together.
@@ -1109,6 +1122,24 @@ impl WindowState {
             set_titlebar_height(self.native_window, height);
         }
     }
+
+    fn set_needs_display_async(&self) {
+        if self.display_pending.replace(true) {
+            render_diagnostics::record_event(
+                self.window_id,
+                RenderDiagnosticEvent::DisplayAlreadyPending,
+            );
+            return;
+        }
+
+        render_diagnostics::record_event(
+            self.window_id,
+            RenderDiagnosticEvent::SetNeedsDisplayAsync,
+        );
+        unsafe {
+            let _: () = msg_send![self.native_window, setNeedsDisplayAsync];
+        }
+    }
 }
 
 impl platform::WindowContext for WindowState {
@@ -1135,27 +1166,27 @@ impl platform::WindowContext for WindowState {
     }
 
     fn render_scene(&self, scene: Rc<Scene>) {
+        render_diagnostics::record_event(self.window_id, RenderDiagnosticEvent::SubmitScene);
         *self.next_scene.borrow_mut() = Some(scene);
-        unsafe {
-            let _: () = msg_send![self.native_window, setNeedsDisplayAsync];
-        }
+        self.set_needs_display_async();
     }
 
     fn request_redraw(&self) {
+        render_diagnostics::record_event(self.window_id, RenderDiagnosticEvent::RequestRedraw);
         let _ = self.next_scene.borrow_mut().take();
-        unsafe {
-            let _: () = msg_send![self.native_window, setNeedsDisplayAsync];
-        }
+        self.set_needs_display_async();
     }
 
     fn request_frame_capture(
         &self,
         callback: Box<dyn FnOnce(platform::CapturedFrame) + Send + 'static>,
     ) {
+        render_diagnostics::record_event(
+            self.window_id,
+            RenderDiagnosticEvent::RequestFrameCapture,
+        );
         *self.capture_callback.borrow_mut() = Some(callback);
-        unsafe {
-            let _: () = msg_send![self.native_window, setNeedsDisplayAsync];
-        }
+        self.set_needs_display_async();
     }
 }
 
@@ -1323,17 +1354,20 @@ extern "C-unwind" fn warp_view_set_frame_size(this: &Object, size: NSSize, async
 
 #[no_mangle]
 extern "C-unwind" fn warp_update_layer(this: &Object) {
-    if !app::callback_dispatcher().can_borrow_mut() {
-        #[cfg(debug_assertions)]
-        log::warn!(
-            "Tried to update window's backing CAMetalDrawable but app was already mutably borrowed!\nStack trace:\n{:#}",
-            std::backtrace::Backtrace::force_capture()
-        );
-        return;
-    }
-
     unsafe {
         let window = get_window_state(this);
+        window.display_pending.set(false);
+
+        if !app::callback_dispatcher().can_borrow_mut() {
+            #[cfg(debug_assertions)]
+            log::warn!(
+                "Tried to update window's backing CAMetalDrawable but app was already mutably borrowed!\nStack trace:\n{:#}",
+                std::backtrace::Backtrace::force_capture()
+            );
+            return;
+        }
+
+        render_diagnostics::record_event(window.window_id, RenderDiagnosticEvent::MacUpdateLayer);
 
         let scene = {
             if window.next_scene.borrow().is_none() {
@@ -1607,6 +1641,7 @@ fn schedule_synthetic_drag(
     position: Vector2F,
     modifiers: ModifiersState,
 ) {
+    render_diagnostics::record_repaint_source(window_state.window_id, "mac_synthetic_drag");
     let drag_id = window_state.next_synthetic_drag_id();
     let weak_window_state = Rc::downgrade(window_state);
     let instant = Instant::now() + Duration::from_millis(16);

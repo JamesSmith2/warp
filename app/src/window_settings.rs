@@ -6,7 +6,7 @@ use warpui::{AppContext, WindowId};
 define_settings_group!(WindowSettings, settings: [
     background_blur_radius: BackgroundBlurRadius {
         type: u8,
-        default: 1,
+        default: 0,
         supported_platforms: SupportedPlatforms::MAC,
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
@@ -96,7 +96,7 @@ impl ZoomLevel {
 }
 
 impl BackgroundBlurRadius {
-    pub const MIN: u8 = 1;
+    pub const MIN: u8 = 0;
     pub const MAX: u8 = 64;
 
     fn validate(&self, new_value: u8) -> u8 {

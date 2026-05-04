@@ -127,6 +127,7 @@ use warpui::fonts::{FamilyId, Properties, Weight};
 use warpui::keymap::{Keystroke, PerPlatformKeystroke};
 use warpui::platform::{Cursor, FilePickerConfiguration, OperatingSystem};
 use warpui::r#async::{SpawnedFutureHandle, Timer};
+use warpui::render_diagnostics;
 use warpui::text::word_boundaries::WordBoundariesPolicy;
 use warpui::text::TextBuffer;
 use warpui::text_layout::TextStyle;
@@ -7444,6 +7445,7 @@ impl EditorView {
                 cursor_blink.value() == &CursorBlink::Enabled || !self.cursors_visible
             )
         {
+            render_diagnostics::record_repaint_source(ctx.window_id(), "editor_cursor_blink");
             self.cursors_visible = !self.cursors_visible;
             ctx.notify();
 

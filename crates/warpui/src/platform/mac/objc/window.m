@@ -282,7 +282,8 @@ static NSLayoutConstraint *configure_titlebar_height(NSWindow *window, CGFloat h
 }
 
 // Initializes an NSWindow that conforms to our window protocol.
-void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, bool hideTitleBar) {
+void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, bool hideTitleBar,
+                        bool opaque) {
     window.testMode = testMode;
     window.hideTitleBar = hideTitleBar;
 
@@ -293,7 +294,9 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
     // provides evidence that we're not the only one observing this issue.
     //
     // Setting some non-zero alpha component for the background color fixes the issue.
-    window.backgroundColor = [NSColor.clearColor colorWithAlphaComponent:0.01];
+    window.backgroundColor =
+        opaque ? NSColor.blackColor : [NSColor.clearColor colorWithAlphaComponent:0.01];
+    window.opaque = opaque ? YES : NO;
     window.releasedWhenClosed = YES;
     window.acceptsMouseMovedEvents = YES;
     window.titlebarAppearsTransparent = hideTitleBar;
@@ -497,7 +500,8 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
                           metalDevice:(id)metalDevice
                        hidingTitleBar:(BOOL)hideTitleBar
            backgroundBlurRadiusPixels:(uint8)backgoundBlurRadiusPixels
-                         withTestMode:(BOOL)testMode {
+                         withTestMode:(BOOL)testMode
+                                opaque:(BOOL)opaque {
     NSWindowStyleMask mask = warpWindowMask;
 
     if (hideTitleBar) {
@@ -508,7 +512,7 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
                                                               styleMask:mask
                                                                 backing:NSBackingStoreBuffered
                                                                   defer:NO];
-    init_warp_nswindow(window_result, testMode, hideTitleBar);
+    init_warp_nswindow(window_result, testMode, hideTitleBar, opaque);
 
     return window_result;
 }
@@ -661,7 +665,8 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
                          metalDevice:(id)metalDevice
                       hidingTitleBar:(BOOL)hideTitleBar
           backgroundBlurRadiusPixels:(uint8)backgoundBlurRadiusPixels
-                        withTestMode:(BOOL)testMode {
+                        withTestMode:(BOOL)testMode
+                               opaque:(BOOL)opaque {
     NSWindowStyleMask mask = warpWindowMask | NSWindowStyleMaskNonactivatingPanel;
 
     if (hideTitleBar) {
@@ -672,7 +677,7 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
                                                             styleMask:mask
                                                               backing:NSBackingStoreBuffered
                                                                 defer:NO];
-    init_warp_nswindow(window_result, testMode, hideTitleBar);
+    init_warp_nswindow(window_result, testMode, hideTitleBar, opaque);
 
     return window_result;
 }
@@ -686,7 +691,7 @@ void set_window_background_blur_radius(id window, uint8 blurRadiusPixels) {
         CGSSetWindowBackgroundBlurRadiusFunction *function =
             GetCGSSetWindowBackgroundBlurRadiusFunction();
         if (function) {
-            function(con, windowNumber, (int)MAX(1, blurRadiusPixels));
+            function(con, windowNumber, (int)blurRadiusPixels);
         }
     }
 }
@@ -708,7 +713,7 @@ static void attach_warp_window_delegate(NSWindow *window) {
 
 // \return a new, retained WarpPanel with the given content rect.
 id create_warp_nspanel(NSRect contentRect, id metalDevice, BOOL hideTitleBar,
-                       uint8 backgroundBlurRadiusPixels, BOOL testMode) {
+                       uint8 backgroundBlurRadiusPixels, BOOL opaque, BOOL testMode) {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
 
     if (testMode) {
@@ -718,14 +723,16 @@ id create_warp_nspanel(NSRect contentRect, id metalDevice, BOOL hideTitleBar,
     }
 
     WarpPanel *window = [WarpPanel createWithContentRect:contentRect
-                                             metalDevice:metalDevice
-                                          hidingTitleBar:hideTitleBar
+                                            metalDevice:metalDevice
+                                         hidingTitleBar:hideTitleBar
                               backgroundBlurRadiusPixels:backgroundBlurRadiusPixels
-                                            withTestMode:testMode];
+                                            withTestMode:testMode
+                                                   opaque:opaque];
 
     WarpHostView *hostView = [[[WarpHostView alloc] initWithFrame:contentRect
                                                       metalDevice:metalDevice
                                                enableTitlebarDrag:NO
+                                                           opaque:opaque
                                                          testMode:testMode] autorelease];
 
     attach_warp_window_delegate(window);
@@ -739,7 +746,7 @@ id create_warp_nspanel(NSRect contentRect, id metalDevice, BOOL hideTitleBar,
 
 // \return a new, retained WarpWindow with the given content rect.
 id create_warp_nswindow(NSRect contentRect, id metalDevice, BOOL hideTitleBar,
-                        uint8 backgroundBlurRadiusPixels, BOOL testMode) {
+                        uint8 backgroundBlurRadiusPixels, BOOL opaque, BOOL testMode) {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
 
     if (testMode) {
@@ -749,14 +756,16 @@ id create_warp_nswindow(NSRect contentRect, id metalDevice, BOOL hideTitleBar,
     }
 
     WarpWindow *window = [WarpWindow createWithContentRect:contentRect
-                                               metalDevice:metalDevice
-                                            hidingTitleBar:hideTitleBar
+                                              metalDevice:metalDevice
+                                           hidingTitleBar:hideTitleBar
                                 backgroundBlurRadiusPixels:backgroundBlurRadiusPixels
-                                              withTestMode:testMode];
+                                              withTestMode:testMode
+                                                     opaque:opaque];
 
     WarpHostView *hostView = [[[WarpHostView alloc] initWithFrame:contentRect
                                                       metalDevice:metalDevice
                                                enableTitlebarDrag:YES
+                                                           opaque:opaque
                                                          testMode:testMode] autorelease];
 
     attach_warp_window_delegate(window);

@@ -942,7 +942,10 @@ pub fn init(app: &mut AppContext) {
         .with_custom_action(CustomAction::CloseTab)
         .with_group(bindings::BindingGroup::Close.as_str())
         .with_context_predicate(
-            id!("Workspace") & (id!("Workspace_CloseWindow") | id!("Workspace_MultipleTabs")),
+            id!("Workspace")
+                & (id!("Workspace_CloseWindow")
+                    | id!("Workspace_MultipleTabs")
+                    | id!("Workspace_WorkspaceGroups")),
         ),
         EditableBinding::new(
             "workspace:close_other_tabs",
