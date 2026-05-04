@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# Launch iTerm2, run the same terminal-output/tab-switch workload used by
+# profile_gpu_oss, and summarize a Metal GPU trace. Use the produced
+# summary.json as BASELINE_JSON for script/macos/profile_gpu_oss.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
+cd "${REPO_ROOT}"
+
+DURATION="${DURATION:-20}"
+WARMUP_SECONDS="${WARMUP_SECONDS:-3}"
+SWITCHES="${SWITCHES:-40}"
+SWITCH_DELAY="${SWITCH_DELAY:-0.20}"
+PROFILE_TABS="${PROFILE_TABS:-3}"
+PROFILE_FILL_LINES="${PROFILE_FILL_LINES:-240}"
+PROFILE_START_DELAY_MS="${PROFILE_START_DELAY_MS:-5000}"
+PROFILE_LINE_DELAY="${PROFILE_LINE_DELAY:-0}"
+MAX_GPU_BUSY_PERCENT="${MAX_GPU_BUSY_PERCENT:-10}"
+MAX_GPU_P99_BUSY_PERCENT="${MAX_GPU_P99_BUSY_PERCENT:-10}"
+MAX_COMMAND_BUFFERS_PER_SECOND="${MAX_COMMAND_BUFFERS_PER_SECOND:-120}"
+MAX_PRESENTS_PER_SECOND="${MAX_PRESENTS_PER_SECOND:-120}"
+MAX_BUFFER_WAITS="${MAX_BUFFER_WAITS:-10}"
+GPU_BUCKET_MS="${GPU_BUCKET_MS:-1000}"
+TARGET_RE="${TARGET_RE:-(iTerm2|iTerm)}"
+ITERM_APP_NAME="${ITERM_APP_NAME:-iTerm}"
+RUN_DIR="${RUN_DIR:-$(mktemp -d /private/tmp/iterm2-gpu-profile.XXXXXX)}"
+
+mkdir -p "${RUN_DIR}"
+
+TRACE_PATH="${RUN_DIR}/metal.trace"
+ITERM_LOG="${RUN_DIR}/iterm.log"
+SUMMARY_JSON="${RUN_DIR}/summary.json"
+
+echo "run_dir: ${RUN_DIR}"
+
+launch_iterm_workload() {
+  osascript - "${ITERM_APP_NAME}" "${PROFILE_TABS}" "${PROFILE_FILL_LINES}" "${PROFILE_LINE_DELAY}" <<'OSA'
+on run argv
+  set appName to item 1 of argv
+  set tabCount to (item 2 of argv) as integer
+  set fillLines to item 3 of argv
+  set lineDelay to item 4 of argv
+
+  tell application appName
+    activate
+    set newWindow to (create window with default profile)
+    repeat with tabIndex from 1 to tabCount
+      if tabIndex is greater than 1 then
+        tell current window to create tab with default profile
+      end if
+
+      set commandText to "for i in $(seq 1 " & fillLines & "); do printf 'codex-gpu-profile tab " & tabIndex & " line %04d render-load text text text text text text text text\012' $i; sleep " & lineDelay & "; done"
+      tell current session of current window to write text commandText
+      delay 0.1
+    end repeat
+  end tell
+end run
+OSA
+}
+
+iterm_pid() {
+  pgrep -nx iTerm2 2>/dev/null || pgrep -nx iTerm 2>/dev/null
+}
+
+exercise_tab_switching() {
+  local app_pid="$1"
+  osascript <<OSA
+tell application "System Events"
+  set frontmost of first process whose unix id is ${app_pid} to true
+  delay 0.3
+  repeat with i from 1 to ${SWITCHES}
+    set tabNumber to (((i - 1) mod ${PROFILE_TABS}) + 1) as string
+    keystroke tabNumber using command down
+    delay ${SWITCH_DELAY}
+  end repeat
+end tell
+OSA
+}
+
+echo "Launching iTerm2 workload..."
+launch_iterm_workload >"${ITERM_LOG}" 2>&1
+APP_PID="$(iterm_pid)"
+if [ -z "${APP_PID}" ]; then
+  echo "Could not find iTerm2 process after launch." >&2
+  cat "${ITERM_LOG}" >&2 || true
+  exit 1
+fi
+
+sleep "${WARMUP_SECONDS}"
+
+echo "Recording Metal System Trace for ${DURATION}s attached to pid ${APP_PID}..."
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --attach "${APP_PID}" \
+  --time-limit "${DURATION}s" \
+  --output "${TRACE_PATH}" \
+  --quiet &
+TRACE_PID=$!
+
+sleep "$(awk "BEGIN { print ${PROFILE_START_DELAY_MS} / 1000 }")"
+exercise_tab_switching "${APP_PID}" || true
+wait "${TRACE_PID}"
+
+export_table() {
+  local schema="$1"
+  local output="$2"
+  xcrun xctrace export \
+    --input "${TRACE_PATH}" \
+    --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"${schema}\"]" \
+    --output "${output}" \
+    --quiet
+}
+
+echo "Exporting trace tables..."
+export_table "metal-gpu-intervals" "${RUN_DIR}/metal-gpu-intervals.xml"
+export_table "metal-application-command-buffer-submissions" "${RUN_DIR}/metal-command-buffers.xml"
+export_table "ca-client-present-request" "${RUN_DIR}/ca-client-present-request.xml"
+export_table "ca-client-buffer-wait-interval" "${RUN_DIR}/ca-client-buffer-wait-interval.xml"
+
+echo "Summarizing trace..."
+"${REPO_ROOT}/script/macos/profile_gpu_summary.py" \
+  --run-dir "${RUN_DIR}" \
+  --duration-seconds "${DURATION}" \
+  --target-re "${TARGET_RE}" \
+  --target-pid "${APP_PID}" \
+  --gpu-intervals "${RUN_DIR}/metal-gpu-intervals.xml" \
+  --command-buffers "${RUN_DIR}/metal-command-buffers.xml" \
+  --present-requests "${RUN_DIR}/ca-client-present-request.xml" \
+  --buffer-waits "${RUN_DIR}/ca-client-buffer-wait-interval.xml" \
+  --json-out "${SUMMARY_JSON}" \
+  --max-gpu-busy-percent "${MAX_GPU_BUSY_PERCENT}" \
+  --max-gpu-p99-busy-percent "${MAX_GPU_P99_BUSY_PERCENT}" \
+  --max-command-buffers-per-second "${MAX_COMMAND_BUFFERS_PER_SECOND}" \
+  --max-presents-per-second "${MAX_PRESENTS_PER_SECOND}" \
+  --max-buffer-waits "${MAX_BUFFER_WAITS}" \
+  --bucket-ms "${GPU_BUCKET_MS}" \
+  --fail-thresholds

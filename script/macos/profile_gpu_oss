@@ -1,0 +1,244 @@
+#!/bin/bash
+#
+# Build, launch, exercise, and summarize a Warp OSS Metal GPU trace.
+# This intentionally bypasses ./script/run so OSS users do not need private
+# channel-config repositories.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
+cd "${REPO_ROOT}"
+
+SCENARIO="${1:-tab-switch}"
+PROFILE="${PROFILE:-release-cli-debug_assertions}"
+FEATURES="${FEATURES:-gui}"
+DURATION="${DURATION:-20}"
+WARMUP_SECONDS="${WARMUP_SECONDS:-3}"
+SWITCHES="${SWITCHES:-40}"
+SWITCH_DELAY="${SWITCH_DELAY:-0.20}"
+SWITCH_DELAY_MS="${SWITCH_DELAY_MS:-200}"
+PROFILE_TABS="${PROFILE_TABS:-3}"
+PROFILE_FILL_LINES="${PROFILE_FILL_LINES:-240}"
+PROFILE_START_DELAY_MS="${PROFILE_START_DELAY_MS:-5000}"
+PROFILE_SECOND_PANE_DELAY_MS="${PROFILE_SECOND_PANE_DELAY_MS:-3000}"
+PROFILE_CODEX_LINES="${PROFILE_CODEX_LINES:-360}"
+PROFILE_CODEX_MODEL="${PROFILE_CODEX_MODEL:-gpt-5.4-mini}"
+PROFILE_CODEX_REASONING="${PROFILE_CODEX_REASONING:-low}"
+PROFILE_STREAM_LINES="${PROFILE_STREAM_LINES:-1200}"
+PROFILE_STREAM_DELAY_MS="${PROFILE_STREAM_DELAY_MS:-10}"
+PROFILE_STATIC_LINES="${PROFILE_STATIC_LINES:-900}"
+MAX_GPU_BUSY_PERCENT="${MAX_GPU_BUSY_PERCENT:-10}"
+MAX_GPU_P99_BUSY_PERCENT="${MAX_GPU_P99_BUSY_PERCENT:-10}"
+MAX_COMMAND_BUFFERS_PER_SECOND="${MAX_COMMAND_BUFFERS_PER_SECOND:-120}"
+MAX_PRESENTS_PER_SECOND="${MAX_PRESENTS_PER_SECOND:-120}"
+MAX_BUFFER_WAITS="${MAX_BUFFER_WAITS:-10}"
+GPU_BUCKET_MS="${GPU_BUCKET_MS:-1000}"
+MAX_BASELINE_GPU_BUSY_DELTA="${MAX_BASELINE_GPU_BUSY_DELTA:-2}"
+MAX_BASELINE_P99_BUSY_DELTA="${MAX_BASELINE_P99_BUSY_DELTA:-2}"
+MAX_BASELINE_PRESENTS_DELTA="${MAX_BASELINE_PRESENTS_DELTA:-2}"
+TARGET_RE="${TARGET_RE:-(WarpOss|warp-oss)}"
+RUN_DIR="${RUN_DIR:-$(mktemp -d /private/tmp/warp-gpu-profile.XXXXXX)}"
+PROFILE_CODEX_WORKSPACE_DIR="${PROFILE_CODEX_WORKSPACE_DIR:-${RUN_DIR}/codex-workspace}"
+
+mkdir -p "${RUN_DIR}"
+
+APP_PATH="target/${PROFILE}/bundle/osx/WarpOss.app"
+if [ "${PROFILE}" = "debug" ] || [ "${PROFILE}" = "dev" ]; then
+  APP_PATH="target/debug/bundle/osx/WarpOss.app"
+fi
+APP_BIN="${APP_PATH}/Contents/MacOS/warp-oss"
+TRACE_PATH="${RUN_DIR}/metal.trace"
+WARP_LOG="${RUN_DIR}/warp.log"
+DIAGNOSTICS_LOG="${RUN_DIR}/render-diagnostics.log"
+SUMMARY_JSON="${RUN_DIR}/summary.json"
+
+if [ "${NO_BUILD:-0}" != "1" ]; then
+  echo "Building OSS bundle..."
+  if [ "${PROFILE}" = "debug" ] || [ "${PROFILE}" = "dev" ]; then
+    WARP_BIN_NAME=warp-oss WARP_CHANNEL=oss FEATURES="${FEATURES}" \
+      ./script/macos/run --dont-open
+  else
+    WARP_BIN_NAME=warp-oss WARP_CHANNEL=oss FEATURES="${FEATURES}" \
+      ./script/macos/run --profile "${PROFILE}" --dont-open
+  fi
+fi
+
+if [ ! -x "${APP_BIN}" ]; then
+  echo "Missing Warp OSS binary at ${APP_BIN}" >&2
+  exit 1
+fi
+
+echo "run_dir: ${RUN_DIR}"
+echo "Launching ${APP_BIN}"
+case "${SCENARIO}" in
+  tab-switch)
+    export WARP_GPU_PROFILE_SCENARIO=tab-switch
+    export WARP_GPU_PROFILE_TABS="${PROFILE_TABS}"
+    export WARP_GPU_PROFILE_SWITCHES="${SWITCHES}"
+    export WARP_GPU_PROFILE_FILL_TERMINAL_LINES="${PROFILE_FILL_LINES}"
+    export WARP_GPU_PROFILE_START_DELAY_MS="${PROFILE_START_DELAY_MS}"
+    export WARP_GPU_PROFILE_SWITCH_DELAY_MS="${SWITCH_DELAY_MS}"
+    ;;
+  codex-split)
+    mkdir -p "${PROFILE_CODEX_WORKSPACE_DIR}"
+    export WARP_GPU_PROFILE_SCENARIO=codex-split
+    export WARP_GPU_PROFILE_WORKSPACE_DIR="${PROFILE_CODEX_WORKSPACE_DIR}"
+    export WARP_GPU_PROFILE_START_DELAY_MS="${PROFILE_START_DELAY_MS}"
+    export WARP_GPU_PROFILE_SECOND_PANE_DELAY_MS="${PROFILE_SECOND_PANE_DELAY_MS}"
+    export WARP_GPU_PROFILE_CODEX_LINES="${PROFILE_CODEX_LINES}"
+    export WARP_GPU_PROFILE_CODEX_MODEL="${PROFILE_CODEX_MODEL}"
+    export WARP_GPU_PROFILE_CODEX_REASONING="${PROFILE_CODEX_REASONING}"
+    ;;
+  stream-output)
+    export WARP_GPU_PROFILE_SCENARIO=stream-output
+    export WARP_GPU_PROFILE_START_DELAY_MS="${PROFILE_START_DELAY_MS}"
+    export WARP_GPU_PROFILE_STREAM_LINES="${PROFILE_STREAM_LINES}"
+    export WARP_GPU_PROFILE_STREAM_DELAY_MS="${PROFILE_STREAM_DELAY_MS}"
+    ;;
+  codex-like-split)
+    export WARP_GPU_PROFILE_SCENARIO=codex-like-split
+    export WARP_GPU_PROFILE_START_DELAY_MS="${PROFILE_START_DELAY_MS}"
+    export WARP_GPU_PROFILE_SECOND_PANE_DELAY_MS="${PROFILE_SECOND_PANE_DELAY_MS}"
+    export WARP_GPU_PROFILE_STATIC_LINES="${PROFILE_STATIC_LINES}"
+    export WARP_GPU_PROFILE_STREAM_LINES="${PROFILE_STREAM_LINES}"
+    export WARP_GPU_PROFILE_STREAM_DELAY_MS="${PROFILE_STREAM_DELAY_MS}"
+    ;;
+esac
+WARP_RENDER_DIAGNOSTICS=1 WARP_RENDER_DIAGNOSTICS_LOG=1 WARP_RENDER_DIAGNOSTICS_FILE="${DIAGNOSTICS_LOG}" \
+  "${APP_BIN}" >"${WARP_LOG}" 2>&1 &
+APP_PID=$!
+
+cleanup() {
+  if [ -n "${TRACE_PID:-}" ] && kill -0 "${TRACE_PID}" 2>/dev/null; then
+    kill "${TRACE_PID}" 2>/dev/null || true
+  fi
+  if kill -0 "${APP_PID}" 2>/dev/null; then
+    kill "${APP_PID}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+sleep "${WARMUP_SECONDS}"
+if ! kill -0 "${APP_PID}" 2>/dev/null; then
+  echo "Warp OSS exited before tracing. Last log lines:" >&2
+  tail -80 "${WARP_LOG}" >&2 || true
+  exit 1
+fi
+
+focus_warp() {
+  osascript <<OSA
+tell application "System Events"
+  set frontmost of first process whose unix id is ${APP_PID} to true
+end tell
+OSA
+}
+
+exercise_tab_switching() {
+  osascript <<OSA
+tell application "System Events"
+  set frontmost of first process whose unix id is ${APP_PID} to true
+  delay 0.3
+  keystroke "t" using command down
+  delay 0.2
+  keystroke "t" using command down
+  delay 0.2
+  repeat with i from 1 to ${SWITCHES}
+    set tabNumber to (((i - 1) mod 3) + 1) as string
+    keystroke tabNumber using command down
+    delay ${SWITCH_DELAY}
+  end repeat
+end tell
+OSA
+}
+
+echo "Recording Metal System Trace for ${DURATION}s..."
+xcrun xctrace record \
+  --template 'Metal System Trace' \
+  --attach "${APP_PID}" \
+  --time-limit "${DURATION}s" \
+  --output "${TRACE_PATH}" \
+  --quiet &
+TRACE_PID=$!
+
+sleep 1
+case "${SCENARIO}" in
+  idle)
+    focus_warp >/dev/null 2>&1 || true
+    ;;
+  manual)
+    focus_warp >/dev/null 2>&1 || true
+    echo "Manual trace running. Switch tabs in Warp now; recording ends after ${DURATION}s."
+    sleep "${DURATION}"
+    ;;
+  tab-switch)
+    echo "Internal tab-switch scenario running in Warp; recording ends after ${DURATION}s."
+    ;;
+  codex-split)
+    echo "Internal codex-split scenario running in Warp with ${PROFILE_CODEX_MODEL}/${PROFILE_CODEX_REASONING}; recording ends after ${DURATION}s."
+    ;;
+  stream-output)
+    echo "Internal stream-output scenario running in Warp; recording ends after ${DURATION}s."
+    ;;
+  codex-like-split)
+    echo "Internal codex-like-split scenario running in Warp; recording ends after ${DURATION}s."
+    ;;
+  tab-switch-appleevents)
+    exercise_tab_switching
+    ;;
+  *)
+    echo "Unknown scenario: ${SCENARIO}" >&2
+    echo "Known scenarios: idle, manual, stream-output, codex-like-split, tab-switch, codex-split, tab-switch-appleevents" >&2
+    exit 1
+    ;;
+esac
+
+wait "${TRACE_PID}"
+
+export_table() {
+  local schema="$1"
+  local output="$2"
+  xcrun xctrace export \
+    --input "${TRACE_PATH}" \
+    --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"${schema}\"]" \
+    --output "${output}" \
+    --quiet
+}
+
+echo "Exporting trace tables..."
+export_table "metal-gpu-intervals" "${RUN_DIR}/metal-gpu-intervals.xml"
+export_table "metal-application-command-buffer-submissions" "${RUN_DIR}/metal-command-buffers.xml"
+export_table "ca-client-present-request" "${RUN_DIR}/ca-client-present-request.xml"
+export_table "ca-client-buffer-wait-interval" "${RUN_DIR}/ca-client-buffer-wait-interval.xml"
+
+echo "Summarizing trace..."
+SUMMARY_EXTRA_ARGS=()
+if [ -n "${BASELINE_JSON:-}" ]; then
+  SUMMARY_EXTRA_ARGS+=(
+    --baseline-json "${BASELINE_JSON}"
+    --max-baseline-gpu-busy-delta "${MAX_BASELINE_GPU_BUSY_DELTA}"
+    --max-baseline-p99-busy-delta "${MAX_BASELINE_P99_BUSY_DELTA}"
+    --max-baseline-presents-delta "${MAX_BASELINE_PRESENTS_DELTA}"
+  )
+fi
+
+set +u
+"${REPO_ROOT}/script/macos/profile_gpu_summary.py" \
+  --run-dir "${RUN_DIR}" \
+  --duration-seconds "${DURATION}" \
+  --target-re "${TARGET_RE}" \
+  --target-pid "${APP_PID}" \
+  --gpu-intervals "${RUN_DIR}/metal-gpu-intervals.xml" \
+  --command-buffers "${RUN_DIR}/metal-command-buffers.xml" \
+  --present-requests "${RUN_DIR}/ca-client-present-request.xml" \
+  --buffer-waits "${RUN_DIR}/ca-client-buffer-wait-interval.xml" \
+  --diagnostics-log "${DIAGNOSTICS_LOG}" \
+  --json-out "${SUMMARY_JSON}" \
+  --max-gpu-busy-percent "${MAX_GPU_BUSY_PERCENT}" \
+  --max-gpu-p99-busy-percent "${MAX_GPU_P99_BUSY_PERCENT}" \
+  --max-command-buffers-per-second "${MAX_COMMAND_BUFFERS_PER_SECOND}" \
+  --max-presents-per-second "${MAX_PRESENTS_PER_SECOND}" \
+  --max-buffer-waits "${MAX_BUFFER_WAITS}" \
+  --bucket-ms "${GPU_BUCKET_MS}" \
+  --fail-thresholds \
+  "${SUMMARY_EXTRA_ARGS[@]}"
+set -u

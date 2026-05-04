@@ -21,6 +21,7 @@ pub mod notification;
 pub mod platform;
 pub mod prelude;
 pub mod presenter;
+pub mod render_diagnostics;
 pub mod rendering;
 pub mod scene;
 pub mod telemetry;

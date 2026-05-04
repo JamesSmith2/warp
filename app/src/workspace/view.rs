@@ -143,6 +143,7 @@ use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
 use sentry::protocol::{Attachment, AttachmentType};
 use serde_json;
 use warpui::notification::NotificationSendError;
+use warpui::render_diagnostics;
 
 use super::hoa_onboarding::{
     mark_hoa_onboarding_completed, HoaOnboardingFlow, HoaOnboardingFlowEvent, HoaOnboardingStep,
@@ -3290,6 +3291,7 @@ impl Workspace {
         ws.sync_panel_positions_from_config(ctx);
         ws.sync_window_button_visibility(ctx);
         ws.update_titlebar_height(ctx);
+        ws.maybe_start_gpu_profile_scenario(ctx);
         // Seed the settings pane with the initial settings-file error (if
         // any) read from `GlobalResourceHandles`. Subsequent updates are
         // pushed by `subscribe_to_settings_errors` and `dismiss_workspace_banner`.
@@ -3301,6 +3303,363 @@ impl Workspace {
         });
 
         ws
+    }
+
+    #[cfg(target_os = "macos")]
+    fn maybe_start_gpu_profile_scenario(&mut self, ctx: &mut ViewContext<Self>) {
+        let Ok(scenario) = env::var("WARP_GPU_PROFILE_SCENARIO") else {
+            return;
+        };
+
+        match scenario.as_str() {
+            "tab-switch" => self.start_gpu_profile_tab_switch_scenario(ctx),
+            "codex-split" => self.start_gpu_profile_codex_split_scenario(ctx),
+            "stream-output" => self.start_gpu_profile_stream_output_scenario(ctx),
+            "codex-like-split" => self.start_gpu_profile_codex_like_split_scenario(ctx),
+            other => log::warn!("Unknown WARP_GPU_PROFILE_SCENARIO={other:?}"),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn maybe_start_gpu_profile_scenario(&mut self, _: &mut ViewContext<Self>) {}
+
+    #[cfg(target_os = "macos")]
+    fn gpu_profile_env_usize(key: &str, default: usize) -> usize {
+        env::var(key)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn gpu_profile_shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn gpu_profile_codex_command(
+        workspace_dir: &str,
+        pane_number: usize,
+        line_count: usize,
+    ) -> String {
+        let model =
+            env::var("WARP_GPU_PROFILE_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
+        let reasoning =
+            env::var("WARP_GPU_PROFILE_CODEX_REASONING").unwrap_or_else(|_| "low".to_string());
+        let reasoning_config = format!("model_reasoning_effort=\"{reasoning}\"");
+        let prompt = format!(
+            "GPU rendering test pane {pane_number}. Print 40 short numbered status lines about rendering diagnostics, create result-pane-{pane_number}.txt containing a timestamp and five random words, then finish immediately after the file is created."
+        );
+        format!(
+            "printf 'pane {pane_number} start %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > {}; codex exec --skip-git-repo-check --ephemeral --model {} -c {} -C {} -s workspace-write --color always {} < /dev/null; codex_status=$?; if [ \"$codex_status\" -eq 0 ]; then i=1; while [ \"$i\" -le {line_count} ]; do printf 'codex gpu pane {pane_number} render line %04d amber pixel drift canyon velvet\\n' \"$i\"; i=$((i + 1)); sleep 0.01; done; fi; printf 'pane {pane_number} exit %s %s\\n' \"$codex_status\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > {}; exit \"$codex_status\"",
+            Self::gpu_profile_shell_quote(&format!(
+                "{workspace_dir}/pane-{pane_number}-start.txt"
+            )),
+            Self::gpu_profile_shell_quote(&model),
+            Self::gpu_profile_shell_quote(&reasoning_config),
+            Self::gpu_profile_shell_quote(workspace_dir),
+            Self::gpu_profile_shell_quote(&prompt),
+            Self::gpu_profile_shell_quote(&format!(
+                "{workspace_dir}/pane-{pane_number}-exit.txt"
+            )),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_gpu_profile_codex_split_scenario(&mut self, ctx: &mut ViewContext<Self>) {
+        let start_delay = Duration::from_millis(Self::gpu_profile_env_usize(
+            "WARP_GPU_PROFILE_START_DELAY_MS",
+            5000,
+        ) as u64);
+        let second_pane_delay = Duration::from_millis(Self::gpu_profile_env_usize(
+            "WARP_GPU_PROFILE_SECOND_PANE_DELAY_MS",
+            3000,
+        ) as u64);
+        let line_count = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_CODEX_LINES", 360);
+        let workspace_dir = env::var("WARP_GPU_PROFILE_WORKSPACE_DIR").unwrap_or_else(|_| {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default();
+            format!("/private/tmp/warp-gpu-codex-workspace-{timestamp}")
+        });
+
+        if let Err(error) = std::fs::create_dir_all(&workspace_dir) {
+            log::error!("Failed to create GPU profile Codex workspace {workspace_dir:?}: {error}");
+            return;
+        }
+        if let Err(error) = std::fs::write(
+            format!("{workspace_dir}/README.md"),
+            "Temporary workspace for Warp GPU Codex split-pane profiling.\n",
+        ) {
+            log::warn!("Failed to seed GPU profile Codex workspace README: {error}");
+        }
+
+        let first_command = Self::gpu_profile_codex_command(&workspace_dir, 1, line_count);
+        let second_command = Self::gpu_profile_codex_command(&workspace_dir, 2, line_count);
+
+        log::info!(
+            "Starting GPU profile Codex split scenario after {}ms: workspace={workspace_dir} lines={line_count} second_pane_delay_ms={}",
+            start_delay.as_millis(),
+            second_pane_delay.as_millis(),
+        );
+        render_diagnostics::record_repaint_source(ctx.window_id(), "gpu_profile_codex_split_setup");
+
+        ctx.spawn(
+            async move {
+                warpui::r#async::Timer::after(start_delay).await;
+                (first_command, second_command, second_pane_delay)
+            },
+            move |workspace, (first_command, second_command, second_pane_delay), ctx| {
+                workspace.insert_in_input(&first_command, true, true, false, ctx);
+                workspace
+                    .active_tab_pane_group()
+                    .update(ctx, |pane_group, ctx| {
+                        pane_group.add_terminal_pane_ignoring_default_session_mode(
+                            Direction::Right,
+                            None,
+                            ctx,
+                        );
+                    });
+
+                ctx.spawn(
+                    async move {
+                        warpui::r#async::Timer::after(second_pane_delay).await;
+                        second_command
+                    },
+                    move |workspace, second_command, ctx| {
+                        workspace.insert_in_input(&second_command, true, true, false, ctx);
+                        render_diagnostics::record_repaint_source(
+                            ctx.window_id(),
+                            "gpu_profile_codex_split_commands",
+                        );
+                    },
+                );
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_gpu_profile_stream_output_scenario(&mut self, ctx: &mut ViewContext<Self>) {
+        let start_delay = Duration::from_millis(Self::gpu_profile_env_usize(
+            "WARP_GPU_PROFILE_START_DELAY_MS",
+            5000,
+        ) as u64);
+        let line_count = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_STREAM_LINES", 1200);
+        let line_delay_ms = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_STREAM_DELAY_MS", 10);
+        let command = format!(
+            "printf 'warp gpu stream start %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; i=1; while [ \"$i\" -le {line_count} ]; do printf 'warp gpu stream line %04d amber pixel drift canyon velvet slate marker\\n' \"$i\"; i=$((i + 1)); sleep {}; done; printf 'warp gpu stream done %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"",
+            line_delay_ms as f64 / 1000.0,
+        );
+
+        log::info!(
+            "Starting GPU profile stream-output scenario after {}ms: lines={line_count} line_delay_ms={line_delay_ms}",
+            start_delay.as_millis(),
+        );
+        render_diagnostics::record_repaint_source(ctx.window_id(), "gpu_profile_stream_setup");
+
+        ctx.spawn(
+            async move {
+                warpui::r#async::Timer::after(start_delay).await;
+                command
+            },
+            move |workspace, command, ctx| {
+                workspace.insert_in_input(&command, true, true, false, ctx);
+                render_diagnostics::record_repaint_source(
+                    ctx.window_id(),
+                    "gpu_profile_stream_command",
+                );
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn gpu_profile_stream_command(line_count: usize, line_delay_ms: usize, label: &str) -> String {
+        let delay_seconds = line_delay_ms as f64 / 1000.0;
+        format!(
+            "printf '\\033[1m{label} start %s\\033[0m\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; i=1; while [ \"$i\" -le {line_count} ]; do printf '\\033[32m{label} line %04d + amber pixel drift canyon velvet slate marker\\033[0m\\n' \"$i\"; i=$((i + 1)); sleep {delay_seconds}; done; printf '\\033[1m{label} done %s\\033[0m\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn gpu_profile_static_diff_command(line_count: usize) -> String {
+        format!(
+            "printf '\\033[1mstatic diff pane start\\033[0m\\n'; i=1; while [ \"$i\" -le {line_count} ]; do printf '\\033[32m%5d +     let gpu_profile_value_%04d = render_row_%04d();\\033[0m\\n' \"$i\" \"$i\" \"$i\"; i=$((i + 1)); done; printf '\\033[1mstatic diff pane ready\\033[0m\\n'",
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_gpu_profile_codex_like_split_scenario(&mut self, ctx: &mut ViewContext<Self>) {
+        let start_delay = Duration::from_millis(Self::gpu_profile_env_usize(
+            "WARP_GPU_PROFILE_START_DELAY_MS",
+            5000,
+        ) as u64);
+        let second_pane_delay = Duration::from_millis(Self::gpu_profile_env_usize(
+            "WARP_GPU_PROFILE_SECOND_PANE_DELAY_MS",
+            1000,
+        ) as u64);
+        let static_lines = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_STATIC_LINES", 900);
+        let stream_lines = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_STREAM_LINES", 1200);
+        let stream_delay_ms = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_STREAM_DELAY_MS", 10);
+        let left_command = Self::gpu_profile_static_diff_command(static_lines);
+        let right_command = Self::gpu_profile_stream_command(
+            stream_lines,
+            stream_delay_ms,
+            "codex-like right pane",
+        );
+
+        log::info!(
+            "Starting GPU profile codex-like-split scenario after {}ms: static_lines={static_lines} stream_lines={stream_lines} stream_delay_ms={stream_delay_ms} second_pane_delay_ms={}",
+            start_delay.as_millis(),
+            second_pane_delay.as_millis(),
+        );
+        render_diagnostics::record_repaint_source(ctx.window_id(), "gpu_profile_codex_like_setup");
+
+        ctx.spawn(
+            async move {
+                warpui::r#async::Timer::after(start_delay).await;
+                (left_command, right_command, second_pane_delay)
+            },
+            move |workspace, (left_command, right_command, second_pane_delay), ctx| {
+                workspace.insert_in_input(&left_command, true, true, false, ctx);
+                workspace
+                    .active_tab_pane_group()
+                    .update(ctx, |pane_group, ctx| {
+                        pane_group.add_terminal_pane_ignoring_default_session_mode(
+                            Direction::Right,
+                            None,
+                            ctx,
+                        );
+                    });
+
+                ctx.spawn(
+                    async move {
+                        warpui::r#async::Timer::after(second_pane_delay).await;
+                        right_command
+                    },
+                    move |workspace, right_command, ctx| {
+                        workspace.insert_in_input(&right_command, true, true, false, ctx);
+                        render_diagnostics::record_repaint_source(
+                            ctx.window_id(),
+                            "gpu_profile_codex_like_stream_command",
+                        );
+                    },
+                );
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_gpu_profile_tab_switch_scenario(&mut self, ctx: &mut ViewContext<Self>) {
+        let target_tab_count = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_TABS", 3).clamp(2, 9);
+        let switch_count = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_SWITCHES", 40);
+        let fill_lines = Self::gpu_profile_env_usize("WARP_GPU_PROFILE_FILL_TERMINAL_LINES", 0);
+        let start_delay = Duration::from_millis(Self::gpu_profile_env_usize(
+            "WARP_GPU_PROFILE_START_DELAY_MS",
+            5000,
+        ) as u64);
+        let switch_delay = Duration::from_millis(Self::gpu_profile_env_usize(
+            "WARP_GPU_PROFILE_SWITCH_DELAY_MS",
+            200,
+        ) as u64);
+
+        while self.tab_count() < target_tab_count {
+            self.add_new_session_tab_internal_with_default_session_mode_behavior(
+                NewSessionSource::Tab,
+                Some(ctx.window_id()),
+                None,
+                None,
+                false,
+                DefaultSessionModeBehavior::Ignore,
+                ctx,
+            );
+        }
+
+        if fill_lines > 0 {
+            self.populate_gpu_profile_tabs(fill_lines, target_tab_count, ctx);
+        }
+
+        if self.tab_count() > 0 {
+            self.activate_tab_internal(0, ctx);
+            ctx.notify();
+        }
+
+        let tab_count = self.tab_count().min(target_tab_count);
+        log::info!(
+            "Starting GPU profile tab-switch scenario: tabs={tab_count} switches={switch_count} start_delay_ms={} switch_delay_ms={}",
+            start_delay.as_millis(),
+            switch_delay.as_millis(),
+        );
+        render_diagnostics::record_repaint_source(ctx.window_id(), "gpu_profile_setup");
+        Self::schedule_gpu_profile_tab_switch(
+            1,
+            switch_count,
+            tab_count,
+            start_delay,
+            switch_delay,
+            ctx,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn populate_gpu_profile_tabs(
+        &mut self,
+        line_count: usize,
+        target_tab_count: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let tab_count = self.tab_count().min(target_tab_count);
+        for tab_index in 0..tab_count {
+            self.activate_tab_internal(tab_index, ctx);
+            let tab_number = tab_index + 1;
+            let command = format!(
+                "for i in $(seq 1 {line_count}); do printf 'codex-gpu-profile tab {tab_number} line %04d render-load text text text text text text text text\\n' \"$i\"; done"
+            );
+            self.insert_in_input(&command, true, true, false, ctx);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn schedule_gpu_profile_tab_switch(
+        step: usize,
+        switch_count: usize,
+        tab_count: usize,
+        delay: Duration,
+        switch_delay: Duration,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if switch_count == 0 || tab_count < 2 || step > switch_count {
+            return;
+        }
+
+        ctx.spawn(
+            async move {
+                warpui::r#async::Timer::after(delay).await;
+                step
+            },
+            move |workspace, step, ctx| {
+                let live_tab_count = workspace.tab_count().min(tab_count);
+                if live_tab_count < 2 {
+                    return;
+                }
+
+                let target_index = step % live_tab_count;
+                workspace.activate_tab(target_index, ctx);
+
+                if step < switch_count {
+                    Self::schedule_gpu_profile_tab_switch(
+                        step + 1,
+                        switch_count,
+                        live_tab_count,
+                        switch_delay,
+                        switch_delay,
+                        ctx,
+                    );
+                } else {
+                    log::info!("Completed GPU profile tab-switch scenario");
+                }
+            },
+        );
     }
 
     #[cfg(any(test, feature = "integration_tests"))]

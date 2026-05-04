@@ -46,6 +46,7 @@ pub mod use_agent_footer;
 mod zero_state_block;
 
 use warpui::clipboard_utils::get_image_filepaths_from_paths;
+use warpui::render_diagnostics;
 
 use std::ops::Deref as _;
 
@@ -364,7 +365,7 @@ use session_sharing_protocol::common::{
 use shared_session::{SharedSessionAdapter, Viewer};
 use std::any::Any;
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -587,6 +588,9 @@ lazy_static! {
     // the shell, and runs precmd.
     static ref BASELINE_COMMANDS: HashSet<&'static str> = HashSet::from(["", "pwd", "whoami", "cd"]);
 
+    static ref TERMINAL_WAKEUP_REPAINTS_BY_WINDOW: FairMutex<HashMap<WindowId, Instant>> =
+        FairMutex::new(HashMap::new());
+
     // A regex to detect a class of error strings indicating the ControlMaster connection is
     // broken.
     pub static ref CONTROL_MASTER_ERROR_REGEX: regex::Regex =
@@ -641,9 +645,70 @@ lazy_static! {
 pub const AI_CONTROL_PANEL_MARGIN: f32 = 10.;
 
 pub const OVERFLOW_BUTTON_OFFSET_X: f32 = -3.;
+// Keep terminal redraws smooth enough for interactive input echo while still
+// coalescing PTY wakeups to display cadence.
 pub const MAX_WAKEUPS_PER_SECOND: u64 = 60;
 pub const WAKEUP_THROTTLE_PERIOD: Duration =
     Duration::from_micros(1000 * 1000 / MAX_WAKEUPS_PER_SECOND);
+pub const FOCUSED_TERMINAL_WAKEUP_REPAINTS_PER_SECOND: u64 = 8;
+pub const BACKGROUND_TERMINAL_WAKEUP_REPAINTS_PER_SECOND: u64 = 4;
+const FOCUSED_TERMINAL_WAKEUP_REPAINT_PERIOD: Duration =
+    Duration::from_micros(1000 * 1000 / FOCUSED_TERMINAL_WAKEUP_REPAINTS_PER_SECOND);
+const BACKGROUND_TERMINAL_WAKEUP_REPAINT_PERIOD: Duration =
+    Duration::from_micros(1000 * 1000 / BACKGROUND_TERMINAL_WAKEUP_REPAINTS_PER_SECOND);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalWakeupRepaintDecision {
+    Notify,
+    Defer(Duration),
+    Hidden,
+}
+
+fn terminal_wakeup_repaint_decision(
+    was_painted: bool,
+    last_repaint_at: Option<Instant>,
+    now: Instant,
+    period: Duration,
+) -> TerminalWakeupRepaintDecision {
+    if !was_painted {
+        return TerminalWakeupRepaintDecision::Hidden;
+    }
+
+    let Some(last_repaint_at) = last_repaint_at else {
+        return TerminalWakeupRepaintDecision::Notify;
+    };
+
+    let elapsed = if now >= last_repaint_at {
+        now.duration_since(last_repaint_at)
+    } else {
+        Duration::ZERO
+    };
+
+    if elapsed >= period {
+        TerminalWakeupRepaintDecision::Notify
+    } else {
+        TerminalWakeupRepaintDecision::Defer(period - elapsed)
+    }
+}
+
+fn window_terminal_wakeup_repaint_decision(
+    window_id: WindowId,
+    was_painted: bool,
+    now: Instant,
+    period: Duration,
+) -> TerminalWakeupRepaintDecision {
+    let last_repaint_at = TERMINAL_WAKEUP_REPAINTS_BY_WINDOW
+        .lock()
+        .get(&window_id)
+        .copied();
+    terminal_wakeup_repaint_decision(was_painted, last_repaint_at, now, period)
+}
+
+fn record_window_terminal_wakeup_repaint(window_id: WindowId, now: Instant) {
+    TERMINAL_WAKEUP_REPAINTS_BY_WINDOW
+        .lock()
+        .insert(window_id, now);
+}
 
 pub const EXECUTE_PENDING_COMMAND_DELAY: Duration = Duration::from_millis(100);
 
@@ -2548,6 +2613,8 @@ pub struct TerminalView {
     /// Whether or not this terminal session was ever active.
     was_ever_visible: bool,
 
+    terminal_wakeup_repaint_pending: Cell<bool>,
+
     /// The [`EntityId`] for this terminal view.
     view_id: EntityId,
 
@@ -4109,6 +4176,7 @@ impl TerminalView {
             tips_completed: resources.tips_completed.clone(),
             privacy_settings_snapshot: privacy_settings_handle.as_ref(ctx).get_snapshot(ctx),
             was_ever_visible: false,
+            terminal_wakeup_repaint_pending: Cell::new(false),
             view_id: ctx.view_id(),
             current_state: TerminalViewStateChange::default(),
             did_notify_long_running: false,
@@ -7960,12 +8028,84 @@ impl TerminalView {
             model.block_list_mut().update_active_block_height();
         }
         self.maybe_emit_terminal_view_state_changed_for_long_running_block(ctx);
+
+        // Terminal wakeups can affect either the alt screen or the blocklist, but visible PTY
+        // output must not drive a full-window render loop faster than the GPU budget.
+        self.maybe_notify_for_terminal_wakeup(ctx);
+    }
+
+    fn terminal_wakeup_repaint_period(&self) -> Duration {
+        if self.is_focused_and_active {
+            FOCUSED_TERMINAL_WAKEUP_REPAINT_PERIOD
+        } else {
+            BACKGROUND_TERMINAL_WAKEUP_REPAINT_PERIOD
+        }
+    }
+
+    fn maybe_notify_for_terminal_wakeup(&mut self, ctx: &mut ViewContext<Self>) {
+        render_diagnostics::record_event(
+            ctx.window_id(),
+            render_diagnostics::RenderDiagnosticEvent::TerminalWakeup,
+        );
+        self.maybe_notify_for_terminal_wakeup_with_source(ctx, "terminal_wakeup");
+    }
+
+    fn maybe_notify_for_terminal_wakeup_with_source(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+        source: &'static str,
+    ) {
+        match window_terminal_wakeup_repaint_decision(
+            ctx.window_id(),
+            ctx.was_self_painted_in_last_scene(),
+            Instant::now(),
+            self.terminal_wakeup_repaint_period(),
+        ) {
+            TerminalWakeupRepaintDecision::Notify => {
+                self.notify_for_terminal_wakeup(ctx, source);
+            }
+            TerminalWakeupRepaintDecision::Defer(delay) => {
+                render_diagnostics::record_event(
+                    ctx.window_id(),
+                    render_diagnostics::RenderDiagnosticEvent::TerminalWakeupThrottled,
+                );
+                self.schedule_terminal_wakeup_repaint(delay, ctx);
+            }
+            TerminalWakeupRepaintDecision::Hidden => {
+                render_diagnostics::record_event(
+                    ctx.window_id(),
+                    render_diagnostics::RenderDiagnosticEvent::TerminalWakeupHidden,
+                );
+            }
+        }
+    }
+
+    fn notify_for_terminal_wakeup(&mut self, ctx: &mut ViewContext<Self>, source: &'static str) {
+        record_window_terminal_wakeup_repaint(ctx.window_id(), Instant::now());
         self.use_agent_footer.update(ctx, |footer, ctx| {
             footer.notify_and_notify_children(ctx);
         });
-
-        // Need to re-render both the alt screen and the blocklist on keypresses.
+        render_diagnostics::record_event(
+            ctx.window_id(),
+            render_diagnostics::RenderDiagnosticEvent::TerminalWakeupRendered,
+        );
+        render_diagnostics::record_repaint_source(ctx.window_id(), source);
         ctx.notify();
+    }
+
+    fn schedule_terminal_wakeup_repaint(&self, delay: Duration, ctx: &mut ViewContext<Self>) {
+        if self.terminal_wakeup_repaint_pending.replace(true) {
+            return;
+        }
+
+        render_diagnostics::record_event(
+            ctx.window_id(),
+            render_diagnostics::RenderDiagnosticEvent::TerminalWakeupDeferred,
+        );
+        ctx.spawn(Timer::after(delay), |me, _, ctx| {
+            me.terminal_wakeup_repaint_pending.set(false);
+            me.maybe_notify_for_terminal_wakeup_with_source(ctx, "terminal_wakeup_deferred");
+        });
     }
 
     /// This function is invoked whenever we detect an SSH ControlMaster error,

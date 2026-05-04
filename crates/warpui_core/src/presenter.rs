@@ -9,6 +9,7 @@ use crate::{
     event::DispatchedEvent,
     fonts::Cache as FontCache,
     platform::Cursor,
+    render_diagnostics::{self, RenderDiagnosticEvent},
     scene::{Scene, ZIndex},
     text_layout::LayoutCache,
     Action, AppContext, ClipBounds, EntityId, TaskId, View, ViewHandle, WindowId,
@@ -67,6 +68,7 @@ pub struct PaintContext<'a> {
     pending_assets: HashSet<AssetHandle>,
     /// Keep track of all the views that were actually painted in this scene.
     views_painted: HashSet<EntityId>,
+    window_id: WindowId,
 }
 
 #[derive(Default)]
@@ -370,6 +372,7 @@ impl Presenter {
         self.scene = Some(scene.clone());
         self.text_layout_cache.finish_frame();
         self.frame_count += 1;
+        render_diagnostics::record_event(self.window_id, RenderDiagnosticEvent::SceneBuild);
         ctx.load_requested_fallback_families(self.window_id);
         scene
     }
@@ -414,32 +417,45 @@ impl Presenter {
         let mut pending_assets = HashSet::new();
 
         if let Some(root_view_id) = ctx.root_view_id(self.window_id) {
-            let mut paint_ctx = PaintContext {
-                font_cache: ctx.font_cache(),
-                text_layout_cache: &self.text_layout_cache,
-                rendered_views: &mut self.rendered_views,
-                position_cache: &mut self.position_cache,
-                scene: &mut scene,
-                window_size,
-                max_texture_dimension_2d,
-                highlighted_view: self.highlighted_view,
-                current_selection: None,
-                repaint_at: None,
-                pending_assets: HashSet::new(),
-                views_painted: HashSet::new(),
+            let (views_painted, should_reset_cursor) = {
+                let mut paint_ctx = PaintContext {
+                    font_cache: ctx.font_cache(),
+                    text_layout_cache: &self.text_layout_cache,
+                    rendered_views: &mut self.rendered_views,
+                    position_cache: &mut self.position_cache,
+                    scene: &mut scene,
+                    window_size,
+                    max_texture_dimension_2d,
+                    highlighted_view: self.highlighted_view,
+                    current_selection: None,
+                    repaint_at: None,
+                    pending_assets: HashSet::new(),
+                    views_painted: HashSet::new(),
+                    window_id: self.window_id,
+                };
+                paint_ctx.paint(root_view_id, Vector2F::zero(), ctx);
+
+                repaint_at = paint_ctx.repaint_at;
+                pending_assets.extend(paint_ctx.pending_assets);
+
+                // If the cursor shape had been changed by a view and that view is no longer being
+                // rendered, reset the cursor after the paint context releases its app borrow.
+                let should_reset_cursor =
+                    ctx.cursor_updated_for_view
+                        .is_some_and(|(window_id, view_id)| {
+                            self.window_id == window_id
+                                && !paint_ctx.views_painted.contains(&view_id)
+                        });
+
+                (paint_ctx.views_painted, should_reset_cursor)
             };
-            paint_ctx.paint(root_view_id, Vector2F::zero(), ctx);
 
-            repaint_at = paint_ctx.repaint_at;
-            pending_assets.extend(paint_ctx.pending_assets);
-
-            // If the cursor shape had been changed by a view and that view is no longer being
-            // rendered, reset the cursor.
-            if let Some((window_id, view_id)) = ctx.cursor_updated_for_view {
-                if self.window_id == window_id && !paint_ctx.views_painted.contains(&view_id) {
-                    ctx.reset_cursor();
-                }
+            if should_reset_cursor {
+                ctx.reset_cursor();
             }
+            ctx.set_painted_views(self.window_id, views_painted);
+        } else {
+            ctx.set_painted_views(self.window_id, HashSet::new());
         }
 
         // If there is a highlighted view, draw a box over the entire scene with
@@ -630,6 +646,11 @@ impl PaintContext<'_> {
 
     /// Notifies the window it needs a repaint after a certain duration.
     pub fn repaint_after(&mut self, delay: Duration) {
+        self.repaint_after_with_source(delay, "repaint_after");
+    }
+
+    pub fn repaint_after_with_source(&mut self, delay: Duration, source: &'static str) {
+        render_diagnostics::record_repaint_source(self.window_id, source);
         let start_time = Instant::now();
         let new_repaint_at = start_time + delay;
 

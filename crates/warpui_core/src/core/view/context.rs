@@ -102,6 +102,11 @@ impl<'a, T: View> ViewContext<'a, T> {
             .check_view_or_child_focused(self.window_id, &self.view_id)
     }
 
+    pub fn was_self_painted_in_last_scene(&self) -> bool {
+        self.app
+            .was_view_painted_in_last_scene(self.window_id, self.view_id)
+    }
+
     pub fn element_position_by_id<S>(&self, id: S) -> Option<RectF>
     where
         S: AsRef<str>,

@@ -61,6 +61,7 @@ use crate::{
         executor::{self, Background, Foreground, ForegroundTask},
         FutureId,
     },
+    render_diagnostics::{self, RenderDiagnosticEvent},
     rendering,
     util::post_inc,
     Action, AddWindowOptions, AnyModel, AnyModelHandle, AnyView, ApplicationBundleInfo, CursorInfo,
@@ -680,6 +681,9 @@ pub struct AppContext {
     /// If the cursor shape was changed by a view, keep track of that so that we can reset the
     /// cursor if that view goes away.
     pub(crate) cursor_updated_for_view: Option<(WindowId, EntityId)>,
+
+    /// Views that contributed paint commands to the most recently built scene for each window.
+    painted_views_by_window: HashMap<WindowId, HashSet<EntityId>>,
     is_unit_test: bool,
 
     termination_result: OnceLock<TerminationResult>,
@@ -807,6 +811,7 @@ impl AppContext {
             platform_modal_data_map: Default::default(),
             on_draw_frame_error_callback: None,
             cursor_updated_for_view: None,
+            painted_views_by_window: Default::default(),
             is_unit_test,
             termination_result: Default::default(),
             zoom_factor: ZoomFactor::default(),
@@ -949,6 +954,21 @@ impl AppContext {
             .is_some_and(|invalidation| {
                 !invalidation.updated.is_empty() || !invalidation.removed.is_empty()
             })
+    }
+
+    pub(crate) fn set_painted_views(
+        &mut self,
+        window_id: WindowId,
+        painted_views: HashSet<EntityId>,
+    ) {
+        self.painted_views_by_window
+            .insert(window_id, painted_views);
+    }
+
+    pub fn was_view_painted_in_last_scene(&self, window_id: WindowId, view_id: EntityId) -> bool {
+        self.painted_views_by_window
+            .get(&window_id)
+            .is_some_and(|painted_views| painted_views.contains(&view_id))
     }
 
     pub fn presenter(&self, window_id: WindowId) -> Option<Rc<RefCell<Presenter>>> {
@@ -2566,6 +2586,7 @@ impl AppContext {
         self.presenters.remove(&window_id);
         self.invalidation_callbacks.remove(&window_id);
         self.window_invalidations.remove(&window_id);
+        self.painted_views_by_window.remove(&window_id);
         autotracking::close_window(window_id);
 
         let mut subscriptions = HashMap::new();
@@ -2711,6 +2732,7 @@ impl AppContext {
 
     /// Builds a new scene for the given window.
     fn build_scene(&mut self, window_id: WindowId, window: &dyn WindowContext) -> Rc<Scene> {
+        render_diagnostics::record_event(window_id, RenderDiagnosticEvent::RenderScene);
         let mut scene = Rc::new(Scene::new(
             window.backing_scale_factor(),
             self.rendering_config(),
@@ -3299,6 +3321,11 @@ impl AppContext {
 
                 // If the timer is no longer in repaint_tasks, it was cancelled.
                 if app.repaint_tasks.remove(&task_id).is_some() {
+                    render_diagnostics::record_repaint_source(window_id, "delayed_repaint_timer");
+                    render_diagnostics::record_event(
+                        window_id,
+                        RenderDiagnosticEvent::RedrawRequested,
+                    );
                     app.window_invalidations
                         .entry(window_id)
                         .or_default()
@@ -3354,6 +3381,11 @@ impl AppContext {
 
                 // If the timer is no longer in repaint_tasks, it was cancelled.
                 if app.repaint_tasks.remove(&task_id).is_some() {
+                    render_diagnostics::record_repaint_source(window_id, "asset_load");
+                    render_diagnostics::record_event(
+                        window_id,
+                        RenderDiagnosticEvent::RedrawRequested,
+                    );
                     app.window_invalidations
                         .entry(window_id)
                         .or_default()
@@ -3466,6 +3498,8 @@ impl AppContext {
         }
 
         // Trigger a redraw on the window.
+        render_diagnostics::record_repaint_source(window_id, "fallback_font_load");
+        render_diagnostics::record_event(window_id, RenderDiagnosticEvent::RedrawRequested);
         self.window_invalidations
             .entry(window_id)
             .or_default()

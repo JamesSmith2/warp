@@ -60,6 +60,50 @@ use crate::test_util::{add_window_with_terminal, assert_eventually};
 
 use super::*;
 
+#[test]
+fn terminal_wakeup_repaint_decision_skips_hidden_views() {
+    let now = Instant::now();
+
+    assert_eq!(
+        terminal_wakeup_repaint_decision(false, None, now, Duration::from_millis(100)),
+        TerminalWakeupRepaintDecision::Hidden
+    );
+}
+
+#[test]
+fn terminal_wakeup_repaint_decision_notifies_first_visible_wakeup() {
+    let now = Instant::now();
+
+    assert_eq!(
+        terminal_wakeup_repaint_decision(true, None, now, Duration::from_millis(100)),
+        TerminalWakeupRepaintDecision::Notify
+    );
+}
+
+#[test]
+fn terminal_wakeup_repaint_decision_defers_until_period_elapsed() {
+    let last_repaint_at = Instant::now();
+    let period = Duration::from_millis(100);
+    let now = last_repaint_at + Duration::from_millis(40);
+
+    assert_eq!(
+        terminal_wakeup_repaint_decision(true, Some(last_repaint_at), now, period),
+        TerminalWakeupRepaintDecision::Defer(Duration::from_millis(60))
+    );
+}
+
+#[test]
+fn terminal_wakeup_repaint_decision_notifies_after_period_elapsed() {
+    let last_repaint_at = Instant::now();
+    let period = Duration::from_millis(100);
+    let now = last_repaint_at + period;
+
+    assert_eq!(
+        terminal_wakeup_repaint_decision(true, Some(last_repaint_at), now, period),
+        TerminalWakeupRepaintDecision::Notify
+    );
+}
+
 fn add_window_with_cloud_mode_terminal(app: &mut App) -> ViewHandle<TerminalView> {
     let tips_model = app.add_model(|_| Default::default());
     let (_, terminal) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
