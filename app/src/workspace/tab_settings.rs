@@ -493,6 +493,15 @@ define_settings_group!(TabSettings, settings: [
         toml_path: "appearance.workspace_groups.enabled",
         description: "Whether to display window-local workspace groups with scoped tabs.",
     },
+    show_workspace_resource_monitor: ShowWorkspaceResourceMonitor {
+        type: bool,
+        default: true,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "appearance.workspace_groups.show_resource_monitor",
+        description: "Whether to show CPU, GPU, and memory usage in the workspace groups panel.",
+    },
     show_vertical_tab_panel_in_restored_windows: ShowVerticalTabPanelInRestoredWindows {
         type: bool,
         default: false,

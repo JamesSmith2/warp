@@ -3952,6 +3952,9 @@ impl Workspace {
             TabSettingsChangedEvent::ShowCodeReviewDiffStats { .. } => {
                 ctx.notify();
             }
+            TabSettingsChangedEvent::ShowWorkspaceResourceMonitor { .. } => {
+                ctx.notify();
+            }
             TabSettingsChangedEvent::DirectoryTabColors { .. } => {
                 if FeatureFlag::DirectoryTabColors.is_enabled() {
                     for tab in &mut self.tabs {

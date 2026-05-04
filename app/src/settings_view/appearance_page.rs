@@ -55,9 +55,9 @@ use crate::window_settings::{
 use crate::workspace::header_toolbar_editor::HeaderToolbarInlineEditor;
 use crate::workspace::tab_settings::{
     DirectoryTabColor, PreserveActiveTabColor, ShowCodeReviewButton, ShowIndicatorsButton,
-    ShowVerticalTabPanelInRestoredWindows, TabCloseButtonPosition, TabSettings,
-    TabSettingsChangedEvent, UseLatestUserPromptAsConversationTitleInTabNames, UseVerticalTabs,
-    WorkspaceDecorationVisibility,
+    ShowVerticalTabPanelInRestoredWindows, ShowWorkspaceResourceMonitor, TabCloseButtonPosition,
+    TabSettings, TabSettingsChangedEvent, UseLatestUserPromptAsConversationTitleInTabNames,
+    UseVerticalTabs, WorkspaceDecorationVisibility,
 };
 use crate::workspace::WorkspaceAction;
 use crate::{editor::EditorView, themes::theme_chooser::ThemeChooserMode};
@@ -460,6 +460,7 @@ pub enum AppearancePageAction {
     ToggleShowCodeReviewButton,
     TogglePreserveActiveTabColor,
     ToggleVerticalTabs,
+    ToggleWorkspaceResourceMonitor,
     ToggleShowVerticalTabPanelInRestoredWindows,
     ToggleUseLatestUserPromptAsConversationTitleInTabNames,
     ToggleLigatureRendering,
@@ -599,6 +600,7 @@ impl TypedActionView for AppearanceSettingsPageView {
             ToggleShowCodeReviewButton => self.toggle_show_code_review_button(ctx),
             TogglePreserveActiveTabColor => self.toggle_preserve_active_tab_color(ctx),
             ToggleVerticalTabs => self.toggle_vertical_tabs(ctx),
+            ToggleWorkspaceResourceMonitor => self.toggle_workspace_resource_monitor(ctx),
             ToggleShowVerticalTabPanelInRestoredWindows => {
                 self.toggle_show_vertical_tab_panel_in_restored_windows(ctx)
             }
@@ -1387,6 +1389,7 @@ impl AppearanceSettingsPageView {
 
         if FeatureFlag::VerticalTabs.is_enabled() {
             tab_settings_widgets.push(Box::new(VerticalTabsWidget::default()));
+            tab_settings_widgets.push(Box::new(WorkspaceResourceMonitorWidget::default()));
             tab_settings_widgets.push(Box::new(
                 ShowVerticalTabPanelInRestoredWindowsWidget::default(),
             ));
@@ -2317,6 +2320,14 @@ impl AppearanceSettingsPageView {
 
         ctx.update_model(&tab_settings, move |tab_settings, ctx| {
             report_if_error!(tab_settings.use_vertical_tabs.set_value(new_value, ctx));
+        });
+    }
+
+    fn toggle_workspace_resource_monitor(&mut self, ctx: &mut ViewContext<Self>) {
+        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+            report_if_error!(settings
+                .show_workspace_resource_monitor
+                .toggle_and_save_value(ctx));
         });
     }
 
@@ -4604,6 +4615,51 @@ impl SettingsWidget for VerticalTabsWidget {
                 })
                 .finish(),
             None,
+        )
+    }
+}
+
+#[derive(Default)]
+struct WorkspaceResourceMonitorWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for WorkspaceResourceMonitorWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "workspace resource monitor cpu gpu memory stats graph"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let tab_settings = TabSettings::as_ref(app);
+
+        render_body_item::<AppearancePageAction>(
+            "Show workspace resource monitor".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                ShowWorkspaceResourceMonitor::storage_key(),
+                ShowWorkspaceResourceMonitor::sync_to_cloud(),
+                &mut view.local_only_icon_tooltip_states.borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            appearance
+                .ui_builder()
+                .switch(self.switch_state.clone())
+                .check(*tab_settings.show_workspace_resource_monitor)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AppearancePageAction::ToggleWorkspaceResourceMonitor);
+                })
+                .finish(),
+            Some("Show CPU, GPU, and memory usage graphs in the workspace sidebar.".to_string()),
         )
     }
 }

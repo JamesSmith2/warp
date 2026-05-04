@@ -30,10 +30,15 @@ const REFRESH_INTERVAL: std::time::Duration =
 const REPORT_WINDOW_S: usize = 300;
 /// The number of data points aggregated into a resource usage report.
 const REPORT_SAMPLE_COUNT: usize = REPORT_WINDOW_S / REFRESH_INTERVAL_S;
+/// The time window shown in the workspace resource monitor, in seconds.
+const RESOURCE_HISTORY_WINDOW_S: usize = 30 * 60;
+/// The number of data points shown in the workspace resource monitor.
+const RESOURCE_HISTORY_SAMPLE_COUNT: usize = RESOURCE_HISTORY_WINDOW_S / REFRESH_INTERVAL_S;
 
 // Make sure the refresh interval cleanly divides the report window into an
 // integral number of samples.
 static_assertions::const_assert_eq!(REPORT_WINDOW_S % REFRESH_INTERVAL_S, 0);
+static_assertions::const_assert_eq!(RESOURCE_HISTORY_WINDOW_S % REFRESH_INTERVAL_S, 0);
 
 pub enum SystemInfoEvent {
     /// There is new system info available for consumers to query.
@@ -49,6 +54,8 @@ pub struct SystemInfo {
     has_emitted_memory_warning_event: bool,
     /// A circular buffer storing resource usage data.
     stats: StatsBuffer,
+    /// A circular buffer storing resource usage data for the workspace graph.
+    resource_history: ResourceHistoryBuffer,
     /// Last observed total GPU active time, used to calculate interval usage.
     last_gpu_usage_sample: Option<GpuUsageSample>,
     /// Average GPU usage over the most recent refresh interval.
@@ -76,6 +83,7 @@ impl SystemInfo {
             system: sysinfo::System::new(),
             has_emitted_memory_warning_event: false,
             stats: Default::default(),
+            resource_history: Default::default(),
             last_gpu_usage_sample: None,
             gpu_usage: None,
             resource_usage_reporter: Default::default(),
@@ -90,6 +98,7 @@ impl SystemInfo {
             false, /* refresh_dead_processes */
             Self::refresh_kind(),
         );
+        me.system.refresh_memory();
 
         // If we're doing automated heap usage tracking, set up periodic
         // refreshes of the memory usage data.
@@ -141,6 +150,16 @@ impl SystemInfo {
         self.gpu_usage
     }
 
+    pub fn current_resource_usage_sample(&self) -> ResourceUsageSample {
+        self.resource_history
+            .last()
+            .unwrap_or_else(|| self.resource_usage_sample(self.memory_footprint()))
+    }
+
+    pub fn resource_usage_history(&self) -> impl Iterator<Item = ResourceUsageSample> + '_ {
+        self.resource_history.iter().copied()
+    }
+
     pub fn long_os_version(&self) -> Option<&str> {
         self.long_os_version.as_deref()
     }
@@ -163,16 +182,18 @@ impl SystemInfo {
             false, /* refresh_dead_processes */
             Self::refresh_kind(),
         );
-        ctx.emit(SystemInfoEvent::Refreshed);
+        self.system.refresh_memory();
 
-        // Add resource usage information to our circular buffer.
-        self.stats.push(Sample {
-            cpu: self.cpu_usage(),
-        });
         self.refresh_gpu_usage();
-
+        let cpu_usage = self.cpu_usage();
         let rss = self.used_memory();
         let footprint = self.memory_footprint();
+
+        // Add resource usage information to our circular buffer.
+        self.stats.push(Sample { cpu: cpu_usage });
+        self.resource_history
+            .push(self.resource_usage_sample(footprint));
+
         self.check_for_excessive_memory_usage(rss, footprint, ctx);
 
         // Once we have a full buffer of statistics, consider sending a report
@@ -180,6 +201,8 @@ impl SystemInfo {
         if self.stats.is_full() {
             self.resource_usage_reporter.maybe_send_report(ctx);
         }
+
+        ctx.emit(SystemInfoEvent::Refreshed);
     }
 
     fn refresh_gpu_usage(&mut self) {
@@ -201,6 +224,23 @@ impl SystemInfo {
         }
 
         self.last_gpu_usage_sample = Some(sample);
+    }
+
+    fn resource_usage_sample(&self, memory_footprint: Byte) -> ResourceUsageSample {
+        ResourceUsageSample {
+            cpu_usage: self.cpu_usage(),
+            gpu_usage: self.gpu_usage(),
+            memory_footprint_bytes: memory_footprint.as_u64(),
+            memory_usage: self.memory_usage(memory_footprint),
+        }
+    }
+
+    fn memory_usage(&self, memory_footprint: Byte) -> Option<f32> {
+        let total_memory = self.system.total_memory();
+        if total_memory == 0 {
+            return None;
+        }
+        Some(memory_footprint.as_u64() as f32 / total_memory as f32)
     }
 
     /// Checks for excessive memory usage.  This may send a telemetry event
@@ -617,6 +657,21 @@ struct Sample {
     cpu: f32,
 }
 
+/// A single process resource usage sample for UI display.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResourceUsageSample {
+    /// The CPU usage since the last sample, represented as a value in the
+    /// range [0, num_cpus].
+    pub cpu_usage: f32,
+    /// The GPU active time since the last sample, represented as a value in
+    /// the range [0, 1] for one fully active GPU.
+    pub gpu_usage: Option<f32>,
+    /// The full process memory footprint in bytes.
+    pub memory_footprint_bytes: u64,
+    /// The process memory footprint divided by total system memory.
+    pub memory_usage: Option<f32>,
+}
+
 /// A simple fixed-size circular buffer for storing resource usage sample
 /// points.
 struct StatsBuffer {
@@ -654,6 +709,45 @@ impl StatsBuffer {
 }
 
 impl Default for StatsBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A simple fixed-size circular buffer for storing resource usage sample
+/// points for the workspace resource monitor.
+struct ResourceHistoryBuffer {
+    stats: VecDeque<ResourceUsageSample>,
+}
+
+impl ResourceHistoryBuffer {
+    fn new() -> Self {
+        Self {
+            stats: VecDeque::with_capacity(RESOURCE_HISTORY_SAMPLE_COUNT),
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.stats.len() == self.stats.capacity()
+    }
+
+    fn push(&mut self, sample: ResourceUsageSample) {
+        if self.is_full() {
+            self.stats.pop_front();
+        }
+        self.stats.push_back(sample);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &ResourceUsageSample> {
+        self.stats.iter()
+    }
+
+    fn last(&self) -> Option<ResourceUsageSample> {
+        self.stats.back().copied()
+    }
+}
+
+impl Default for ResourceHistoryBuffer {
     fn default() -> Self {
         Self::new()
     }

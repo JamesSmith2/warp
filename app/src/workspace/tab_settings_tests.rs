@@ -56,3 +56,30 @@ fn show_vertical_tab_panel_in_restored_windows_uses_vertical_tabs_path() {
         "show_panel_in_restored_windows"
     );
 }
+
+#[test]
+fn show_workspace_resource_monitor_defaults_to_true() {
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+
+        TabSettings::handle(&app).read(&app, |settings, _ctx| {
+            assert!(*settings.show_workspace_resource_monitor);
+        });
+    });
+}
+
+#[test]
+fn show_workspace_resource_monitor_uses_workspace_groups_path() {
+    assert_eq!(
+        ShowWorkspaceResourceMonitor::toml_path(),
+        Some("appearance.workspace_groups.show_resource_monitor")
+    );
+    assert_eq!(
+        ShowWorkspaceResourceMonitor::hierarchy(),
+        Some("appearance.workspace_groups")
+    );
+    assert_eq!(
+        ShowWorkspaceResourceMonitor::toml_key(),
+        "show_resource_monitor"
+    );
+}

@@ -1,28 +1,47 @@
 use crate::appearance::Appearance;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
-use crate::system::SystemInfo;
+use crate::system::{ResourceUsageSample, SystemInfo};
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::workspace::tab_settings::TabSettings;
 use crate::workspace::{Workspace, WorkspaceAction};
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
     Border, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
     DispatchEventResult, DragAxis, Draggable, Element, EventHandler, Expanded, Fill, Flex,
-    Hoverable, MainAxisAlignment, MainAxisSize, Padding, ParentElement, Radius, SavePosition,
-    Shrinkable, Text,
+    Hoverable, MainAxisAlignment, MainAxisSize, Padding, ParentElement, Radius, Rect, SavePosition,
+    Shrinkable, Stack, Text,
 };
 use warpui::platform::Cursor;
-use warpui::{AppContext, SingletonEntity};
+use warpui::{color::ColorU, AppContext, SingletonEntity};
 
 const PANEL_WIDTH: f32 = 220.;
 const ROW_RADIUS: f32 = 4.;
 const COUNT_SLOT_WIDTH: f32 = 24.;
 const MENU_SLOT_WIDTH: f32 = 22.;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+const RESOURCE_GRAPH_BAR_COUNT: usize = 72;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+const RESOURCE_GRAPH_HEIGHT: f32 = 18.;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+const RESOURCE_GRAPH_BAR_WIDTH: f32 = 1.5;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+const RESOURCE_MONITOR_HORIZONTAL_PADDING: f32 = 14.;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+const RESOURCE_MONITOR_CONTENT_WIDTH: f32 =
+    PANEL_WIDTH - (2. * RESOURCE_MONITOR_HORIZONTAL_PADDING);
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+const RESOURCE_METRIC_FONT_SIZE: f32 = 10.5;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+const RESOURCE_TIME_FONT_SIZE: f32 = 9.;
 
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct WorkspaceResourceStats {
     cpu_usage: f32,
     gpu_usage: Option<f32>,
     memory_footprint_bytes: u64,
+    memory_usage: Option<f32>,
+    history: Vec<ResourceUsageSample>,
 }
 
 impl Workspace {
@@ -192,7 +211,9 @@ impl Workspace {
         column.add_child(Shrinkable::new(1., warpui::elements::Empty::new().finish()).finish());
 
         #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
-        column.add_child(Self::render_workspace_resource_stats(app, appearance));
+        if Self::show_workspace_resource_monitor(app) {
+            column.add_child(Self::render_workspace_resource_stats(app, appearance));
+        }
 
         let add_row = EventHandler::new(
             Container::new(
@@ -234,40 +255,192 @@ impl Workspace {
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
-        let label = Self::workspace_resource_stats_label(Self::workspace_resource_stats(app));
-        Container::new(
-            Text::new_inline(label, appearance.ui_font_family(), 10.)
+        let stats = Self::workspace_resource_stats(app);
+        let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+        column.add_child(Self::render_resource_metric_row(
+            "CPU",
+            Self::workspace_resource_percent_label(Some(stats.cpu_usage)),
+            stats.history.iter().map(|sample| Some(sample.cpu_usage)),
+            appearance,
+        ));
+        column.add_child(Self::render_resource_metric_row(
+            "GPU",
+            Self::workspace_resource_percent_label(stats.gpu_usage),
+            stats.history.iter().map(|sample| sample.gpu_usage),
+            appearance,
+        ));
+        column.add_child(Self::render_resource_metric_row(
+            "Memory",
+            Self::format_resource_bytes(stats.memory_footprint_bytes),
+            stats.history.iter().map(|sample| sample.memory_usage),
+            appearance,
+        ));
+
+        let mut time_labels = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center);
+        time_labels.add_child(
+            Text::new_inline(
+                "30m Ago",
+                appearance.ui_font_family(),
+                RESOURCE_TIME_FONT_SIZE,
+            )
+            .with_color(theme.sub_text_color(theme.background()).into())
+            .finish(),
+        );
+        time_labels.add_child(Expanded::new(1., warpui::elements::Empty::new().finish()).finish());
+        time_labels.add_child(
+            Text::new_inline("Now", appearance.ui_font_family(), RESOURCE_TIME_FONT_SIZE)
                 .with_color(theme.sub_text_color(theme.background()).into())
                 .finish(),
-        )
-        .with_padding_left(14.)
-        .with_padding_right(14.)
-        .with_padding_top(4.)
-        .with_padding_bottom(2.)
-        .finish()
+        );
+        column.add_child(
+            ConstrainedBox::new(time_labels.finish())
+                .with_width(RESOURCE_MONITOR_CONTENT_WIDTH)
+                .finish(),
+        );
+
+        Container::new(column.finish())
+            .with_padding_left(RESOURCE_MONITOR_HORIZONTAL_PADDING)
+            .with_padding_right(RESOURCE_MONITOR_HORIZONTAL_PADDING)
+            .with_padding_top(6.)
+            .with_padding_bottom(6.)
+            .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_resource_metric_row(
+        name: &'static str,
+        current_value: String,
+        samples: impl Iterator<Item = Option<f32>>,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let text_color = theme.sub_text_color(theme.background()).into();
+        let graph_color = theme.sub_text_color(theme.background()).into();
+        let guide_color = internal_colors::fg_overlay_2(theme).into();
+
+        let mut label_row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center);
+        label_row.add_child(
+            Text::new_inline(name, appearance.ui_font_family(), RESOURCE_METRIC_FONT_SIZE)
+                .with_color(text_color)
+                .finish(),
+        );
+        label_row.add_child(Expanded::new(1., warpui::elements::Empty::new().finish()).finish());
+        label_row.add_child(
+            Text::new_inline(
+                current_value,
+                appearance.ui_font_family(),
+                RESOURCE_METRIC_FONT_SIZE,
+            )
+            .with_color(text_color)
+            .finish(),
+        );
+
+        let mut metric = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        metric.add_child(
+            ConstrainedBox::new(label_row.finish())
+                .with_width(RESOURCE_MONITOR_CONTENT_WIDTH)
+                .finish(),
+        );
+        metric.add_child(Self::render_resource_graph(
+            Self::downsample_resource_values(samples),
+            graph_color,
+            guide_color,
+        ));
+
+        Container::new(metric.finish())
+            .with_padding_bottom(4.)
+            .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_resource_graph(
+        values: Vec<f32>,
+        color: ColorU,
+        guide_color: ColorU,
+    ) -> Box<dyn Element> {
+        let mut stack = Stack::new();
+        stack.add_child(Self::render_resource_level_guides(guide_color));
+        stack.add_child(Self::render_resource_bars(values, color));
+
+        ConstrainedBox::new(stack.finish())
+            .with_width(RESOURCE_MONITOR_CONTENT_WIDTH)
+            .with_height(RESOURCE_GRAPH_HEIGHT)
+            .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_resource_level_guides(color: ColorU) -> Box<dyn Element> {
+        let mut guides = Flex::column()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+        for _ in 0..=2 {
+            guides.add_child(
+                ConstrainedBox::new(Rect::new().with_background_color(color).finish())
+                    .with_width(RESOURCE_MONITOR_CONTENT_WIDTH)
+                    .with_height(1.)
+                    .finish(),
+            );
+        }
+
+        ConstrainedBox::new(guides.finish())
+            .with_width(RESOURCE_MONITOR_CONTENT_WIDTH)
+            .with_height(RESOURCE_GRAPH_HEIGHT)
+            .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_resource_bars(values: Vec<f32>, color: ColorU) -> Box<dyn Element> {
+        let mut graph = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::End);
+
+        for value in values {
+            let height = (value.clamp(0., 1.) * RESOURCE_GRAPH_HEIGHT).max(1.);
+            graph.add_child(
+                ConstrainedBox::new(Rect::new().with_background_color(color).finish())
+                    .with_width(RESOURCE_GRAPH_BAR_WIDTH)
+                    .with_height(height)
+                    .finish(),
+            );
+        }
+
+        ConstrainedBox::new(graph.finish())
+            .with_width(RESOURCE_MONITOR_CONTENT_WIDTH)
+            .with_height(RESOURCE_GRAPH_HEIGHT)
+            .finish()
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn workspace_resource_stats(app: &AppContext) -> WorkspaceResourceStats {
         let system_info = SystemInfo::as_ref(app);
+        let current = system_info.current_resource_usage_sample();
         WorkspaceResourceStats {
-            cpu_usage: system_info.cpu_usage(),
-            gpu_usage: system_info.gpu_usage(),
-            memory_footprint_bytes: system_info.memory_footprint().as_u64(),
+            cpu_usage: current.cpu_usage,
+            gpu_usage: current.gpu_usage,
+            memory_footprint_bytes: current.memory_footprint_bytes,
+            memory_usage: current.memory_usage,
+            history: system_info.resource_usage_history().collect(),
         }
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
-    fn workspace_resource_stats_label(stats: WorkspaceResourceStats) -> String {
-        let cpu_percent = (stats.cpu_usage.max(0.) * 100.).round() as u32;
-        let gpu = stats
-            .gpu_usage
+    fn show_workspace_resource_monitor(app: &AppContext) -> bool {
+        *TabSettings::as_ref(app).show_workspace_resource_monitor
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn workspace_resource_percent_label(value: Option<f32>) -> String {
+        value
             .map(|usage| format!("{}%", (usage.max(0.) * 100.).round() as u32))
-            .unwrap_or_else(|| "n/a".to_string());
-        format!(
-            "CPU {cpu_percent}% | GPU {gpu} | MEM {}",
-            Self::format_resource_bytes(stats.memory_footprint_bytes)
-        )
+            .unwrap_or_else(|| "n/a".to_string())
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
@@ -291,6 +464,26 @@ impl Workspace {
             format!("{bytes:.0} B")
         }
     }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn downsample_resource_values(samples: impl Iterator<Item = Option<f32>>) -> Vec<f32> {
+        let values: Vec<f32> = samples.map(|sample| sample.unwrap_or(0.).max(0.)).collect();
+        if values.is_empty() {
+            return vec![0.];
+        }
+
+        if values.len() <= RESOURCE_GRAPH_BAR_COUNT {
+            return values;
+        }
+
+        (0..RESOURCE_GRAPH_BAR_COUNT)
+            .map(|index| {
+                let start = index * values.len() / RESOURCE_GRAPH_BAR_COUNT;
+                let end = ((index + 1) * values.len() / RESOURCE_GRAPH_BAR_COUNT).max(start + 1);
+                values[start..end].iter().copied().fold(0., f32::max)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -299,38 +492,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_resource_stats_label_formats_available_gpu_usage() {
+    fn workspace_resource_percent_label_formats_available_value() {
         assert_eq!(
-            Workspace::workspace_resource_stats_label(WorkspaceResourceStats {
-                cpu_usage: 0.123,
-                gpu_usage: Some(0.084),
-                memory_footprint_bytes: 1536 * 1024 * 1024,
-            }),
-            "CPU 12% | GPU 8% | MEM 1.5 GB"
+            Workspace::workspace_resource_percent_label(Some(0.084)),
+            "8%"
         );
     }
 
     #[test]
-    fn workspace_resource_stats_label_formats_unavailable_gpu() {
+    fn workspace_resource_percent_label_formats_unavailable_value() {
+        assert_eq!(Workspace::workspace_resource_percent_label(None), "n/a");
+    }
+
+    #[test]
+    fn workspace_resource_percent_label_allows_multicore_cpu_usage() {
         assert_eq!(
-            Workspace::workspace_resource_stats_label(WorkspaceResourceStats {
-                cpu_usage: 0.025,
-                gpu_usage: None,
-                memory_footprint_bytes: 512 * 1024 * 1024,
-            }),
-            "CPU 3% | GPU n/a | MEM 512 MB"
+            Workspace::workspace_resource_percent_label(Some(1.37)),
+            "137%"
         );
     }
 
     #[test]
-    fn workspace_resource_stats_label_allows_multicore_cpu_usage() {
+    fn downsample_resource_values_preserves_short_history() {
         assert_eq!(
-            Workspace::workspace_resource_stats_label(WorkspaceResourceStats {
-                cpu_usage: 1.37,
-                gpu_usage: Some(1.23),
-                memory_footprint_bytes: 12 * 1024 * 1024 * 1024,
-            }),
-            "CPU 137% | GPU 123% | MEM 12 GB"
+            Workspace::downsample_resource_values([Some(0.1), None, Some(0.3)].into_iter()),
+            vec![0.1, 0., 0.3]
+        );
+    }
+
+    #[test]
+    fn downsample_resource_values_limits_long_history_with_bucket_max() {
+        let values = (0..RESOURCE_GRAPH_BAR_COUNT * 2)
+            .map(|index| Some(index as f32))
+            .collect::<Vec<_>>();
+        let downsampled = Workspace::downsample_resource_values(values.into_iter());
+
+        assert_eq!(downsampled.len(), RESOURCE_GRAPH_BAR_COUNT);
+        assert_eq!(downsampled[0], 1.);
+        assert_eq!(
+            downsampled[RESOURCE_GRAPH_BAR_COUNT - 1],
+            (RESOURCE_GRAPH_BAR_COUNT * 2 - 1) as f32
         );
     }
 }

@@ -54,3 +54,28 @@ fn test_memory_usage_stats_construction() {
     assert_eq!(stats.inactive_24h_stats.num_blocks, 1);
     assert_eq!(stats.inactive_24h_stats.num_lines, 0);
 }
+
+#[test]
+fn resource_history_buffer_keeps_recent_samples() {
+    let mut history = ResourceHistoryBuffer::new();
+
+    for index in 0..RESOURCE_HISTORY_SAMPLE_COUNT + 2 {
+        history.push(ResourceUsageSample {
+            cpu_usage: index as f32,
+            gpu_usage: Some(index as f32 / 2.),
+            memory_footprint_bytes: index as u64,
+            memory_usage: Some(index as f32 / 4.),
+        });
+    }
+
+    let samples = history.iter().copied().collect::<Vec<_>>();
+    assert_eq!(samples.len(), RESOURCE_HISTORY_SAMPLE_COUNT);
+    assert_eq!(samples[0].cpu_usage, 2.);
+    assert_eq!(
+        history
+            .last()
+            .expect("history should have samples")
+            .cpu_usage,
+        (RESOURCE_HISTORY_SAMPLE_COUNT + 1) as f32
+    );
+}
