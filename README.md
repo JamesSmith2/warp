@@ -27,6 +27,36 @@
 
 [Warp](https://www.warp.dev) is an agentic development environment, born out of the terminal. Use Warp's built-in coding agent, or bring your own CLI agent (Claude Code, Codex, Gemini CLI, and others).
 
+## Local Changes in This Branch
+
+This branch adds a window-local workspace grouping surface and a measured GPU-performance path for heavy terminal and agent output.
+
+### Workspace Groups
+
+- Added window-local workspace groups behind the `WindowWorkspaceGroups` feature and the `appearance.workspace_groups.enabled` setting.
+- Added a left-side `Workspaces` panel that can activate, add, rename, close, and drag-reorder workspace groups.
+- Scoped tabs to the active workspace group: switching groups saves the current tabs and active tab, then restores the selected group's tabs.
+- Extended workspace/session snapshots so group names, group tabs, and the active workspace group are restored with the window.
+- Added a panel footer with current process CPU, Metal GPU active-time usage, and memory footprint.
+
+### Rendering and GPU Load
+
+- Coalesced terminal wakeup-driven repaints per window so visible focused terminals repaint at a capped cadence, background terminals repaint less often, and hidden/unpainted terminal views skip wakeup redraws.
+- Added repaint-source and render-diagnostic counters for terminal wakeups, scene builds, redraw requests, command-buffer commits/waits, Metal GPU active time, and terminal surface row dirtiness.
+- Removed the unconditional Metal command-buffer wait from normal rendering; command buffers are only waited on when frame capture needs the completed drawable.
+- Added Metal `GPUStartTime` / `GPUEndTime` sampling so Warp can report its own GPU active-time usage.
+- Added terminal surface metadata and row hashes to the scene so diagnostics can distinguish full terminal submissions from dirty-row changes and fallback cases.
+- Added an opaque macOS window path for fully opaque themes with no background image, including opaque `NSWindow` / host view setup and an opaque Metal clear color.
+- Stopped invisible shimmering text from scheduling animation repaints.
+
+### GPU Profiling and Regression Checks
+
+- Added `script/macos/profile_gpu_oss` to build and launch the OSS app, run a workload, capture an `xctrace` Metal System Trace, export Metal/Core Animation tables, and fail configurable thresholds.
+- Added built-in profile scenarios for `idle`, `stream-output`, `codex-like-split`, `codex-split`, `tab-switch`, and manual tab switching. The `codex-split` scenario defaults to `gpt-5.4-mini` with low reasoning.
+- Added `script/macos/profile_gpu_iterm2` to capture a comparable iTerm2 baseline for the same kind of terminal output workload.
+- Added `script/macos/profile_gpu_summary.py` to parse exported trace tables, summarize Metal GPU busy time, p99 bucket usage, presents/sec, command buffers/sec, buffer waits, repaint sources, and optional baseline deltas.
+- Added focused unit coverage for terminal wakeup repaint decisions, render diagnostics, workspace group behavior, and terminal surface metadata.
+
 ## Installation
 
 You can [download Warp](https://www.warp.dev/download) and [read our docs](https://docs.warp.dev/) for platform-specific instructions.
