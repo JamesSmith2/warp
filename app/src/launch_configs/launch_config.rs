@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use crate::app_state::{
     AppState, LeafContents, PaneNodeSnapshot, SplitDirection as StateSplitDirection, TabSnapshot,
-    WindowSnapshot,
+    WindowSnapshot, WorkspaceGroupSnapshot,
 };
 use crate::themes::theme::AnsiColorIdentifier;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 
 #[cfg(test)]
@@ -31,42 +32,113 @@ impl LaunchConfig {
                 .collect::<Vec<WindowTemplate>>(),
         }
     }
+
+    pub fn from_yaml_str(contents: &str) -> Result<Self> {
+        let mut docs = serde_yaml::Deserializer::from_str(contents);
+        let doc = docs
+            .next()
+            .ok_or_else(|| anyhow!("No launch configuration found"))?;
+        let launch_config = Self::deserialize(doc)?;
+        if docs.next().is_some() {
+            return Err(anyhow!("Expected exactly one launch configuration"));
+        }
+        Ok(launch_config)
+    }
+
+    pub fn to_yaml_string(&self) -> Result<String> {
+        Ok(serde_yaml::to_string(self)?)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct WindowTemplate {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub active_tab_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub active_workspace_group_index: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub workspace_groups: Vec<WorkspaceGroupTemplate>,
+    #[serde(default)]
     pub tabs: Vec<TabTemplate>,
 }
 
 impl From<WindowSnapshot> for WindowTemplate {
     fn from(snapshot: WindowSnapshot) -> Self {
-        let mut active_tab_index = None;
-        let mut num_valid_tabs = 0;
-
-        let tabs = snapshot
-            .tabs
+        let (tabs, active_tab_index) =
+            tab_templates_from_snapshots(snapshot.tabs, snapshot.active_tab_index);
+        let workspace_groups = snapshot
+            .workspace_groups
             .into_iter()
-            .enumerate()
-            .filter_map(|(i, tab)| {
-                let tab = tab.try_into().ok()?;
-
-                if i == snapshot.active_tab_index {
-                    active_tab_index = Some(num_valid_tabs);
-                }
-
-                num_valid_tabs += 1;
-
-                Some(tab)
-            })
-            .collect::<Vec<TabTemplate>>();
+            .map(WorkspaceGroupTemplate::from)
+            .collect::<Vec<_>>();
+        let active_workspace_group_index = if workspace_groups.is_empty() {
+            None
+        } else {
+            Some(
+                snapshot
+                    .active_workspace_group_index
+                    .min(workspace_groups.len() - 1),
+            )
+        };
 
         Self {
+            active_tab_index,
+            active_workspace_group_index,
+            workspace_groups,
+            tabs,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct WorkspaceGroupTemplate {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub color: Option<AnsiColorIdentifier>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub active_tab_index: Option<usize>,
+    #[serde(default)]
+    pub tabs: Vec<TabTemplate>,
+}
+
+impl From<WorkspaceGroupSnapshot> for WorkspaceGroupTemplate {
+    fn from(snapshot: WorkspaceGroupSnapshot) -> Self {
+        let (tabs, active_tab_index) =
+            tab_templates_from_snapshots(snapshot.tabs, snapshot.active_tab_index);
+
+        Self {
+            name: snapshot.name,
+            color: Some(snapshot.color),
             active_tab_index,
             tabs,
         }
     }
+}
+
+fn tab_templates_from_snapshots(
+    tabs: Vec<TabSnapshot>,
+    snapshot_active_tab_index: usize,
+) -> (Vec<TabTemplate>, Option<usize>) {
+    let mut active_tab_index = None;
+    let mut num_valid_tabs = 0;
+
+    let tabs = tabs
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, tab)| {
+            let tab = tab.try_into().ok()?;
+
+            if i == snapshot_active_tab_index {
+                active_tab_index = Some(num_valid_tabs);
+            }
+
+            num_valid_tabs += 1;
+
+            Some(tab)
+        })
+        .collect::<Vec<TabTemplate>>();
+
+    (tabs, active_tab_index)
 }
 
 fn is_falsey(val: &Option<bool>) -> bool {
@@ -235,6 +307,8 @@ pub fn make_mock_single_window_launch_config() -> LaunchConfig {
         active_window_index: Some(0),
         windows: vec![WindowTemplate {
             active_tab_index: Some(0),
+            active_workspace_group_index: None,
+            workspace_groups: vec![],
             tabs: vec![
                 TabTemplate {
                     title: Some("First Tab".to_string()),

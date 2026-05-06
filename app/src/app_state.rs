@@ -64,8 +64,24 @@ pub struct WindowSnapshot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceGroupSnapshot {
     pub name: String,
+    pub color: AnsiColorIdentifier,
     pub tabs: Vec<TabSnapshot>,
     pub active_tab_index: usize,
+}
+
+impl WorkspaceGroupSnapshot {
+    pub(crate) fn default_color_for_index(index: usize) -> AnsiColorIdentifier {
+        const DEFAULT_COLORS: [AnsiColorIdentifier; 6] = [
+            AnsiColorIdentifier::Red,
+            AnsiColorIdentifier::Green,
+            AnsiColorIdentifier::Yellow,
+            AnsiColorIdentifier::Blue,
+            AnsiColorIdentifier::Magenta,
+            AnsiColorIdentifier::Cyan,
+        ];
+
+        DEFAULT_COLORS[index % DEFAULT_COLORS.len()]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

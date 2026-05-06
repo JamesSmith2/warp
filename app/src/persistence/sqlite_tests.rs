@@ -17,6 +17,7 @@ use crate::{
     tab::SelectedTabColor,
     terminal::model::block::SerializedBlock,
     terminal::ShellLaunchData,
+    themes::theme::AnsiColorIdentifier,
 };
 
 use super::{
@@ -225,11 +226,13 @@ fn test_sqlite_round_trips_window_workspace_groups() {
             workspace_groups: vec![
                 WorkspaceGroupSnapshot {
                     name: "Backend".to_string(),
+                    color: AnsiColorIdentifier::Green,
                     tabs: vec![first_tab, third_tab],
                     active_tab_index: 1,
                 },
                 WorkspaceGroupSnapshot {
                     name: "Production".to_string(),
+                    color: AnsiColorIdentifier::Magenta,
                     tabs: vec![second_tab],
                     active_tab_index: 0,
                 },
@@ -263,6 +266,11 @@ fn test_sqlite_round_trips_window_workspace_groups() {
     assert_eq!(window.workspace_groups.len(), 2);
     assert_eq!(window.workspace_groups[0].name, "Backend");
     assert_eq!(window.workspace_groups[1].name, "Production");
+    assert_eq!(window.workspace_groups[0].color, AnsiColorIdentifier::Green);
+    assert_eq!(
+        window.workspace_groups[1].color,
+        AnsiColorIdentifier::Magenta
+    );
     assert_eq!(window.workspace_groups[0].active_tab_index, 1);
     assert_eq!(window.workspace_groups[0].tabs.len(), 2);
     assert_eq!(window.workspace_groups[1].tabs.len(), 1);
@@ -306,11 +314,13 @@ fn test_sqlite_round_trips_empty_window_workspace_group() {
             workspace_groups: vec![
                 WorkspaceGroupSnapshot {
                     name: "Empty".to_string(),
+                    color: AnsiColorIdentifier::Blue,
                     tabs: vec![],
                     active_tab_index: 0,
                 },
                 WorkspaceGroupSnapshot {
                     name: "Saved".to_string(),
+                    color: AnsiColorIdentifier::Cyan,
                     tabs: vec![saved_tab],
                     active_tab_index: 0,
                 },
@@ -344,8 +354,10 @@ fn test_sqlite_round_trips_empty_window_workspace_group() {
     assert!(window.tabs.is_empty());
     assert_eq!(window.workspace_groups.len(), 2);
     assert_eq!(window.workspace_groups[0].name, "Empty");
+    assert_eq!(window.workspace_groups[0].color, AnsiColorIdentifier::Blue);
     assert!(window.workspace_groups[0].tabs.is_empty());
     assert_eq!(window.workspace_groups[1].name, "Saved");
+    assert_eq!(window.workspace_groups[1].color, AnsiColorIdentifier::Cyan);
     assert_eq!(window.workspace_groups[1].tabs.len(), 1);
 }
 

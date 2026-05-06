@@ -895,6 +895,7 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
             let workspace_groups = if window.workspace_groups.is_empty() {
                 vec![WorkspaceGroupSnapshot {
                     name: "Workspace 1".to_string(),
+                    color: WorkspaceGroupSnapshot::default_color_for_index(0),
                     tabs: window.tabs.clone(),
                     active_tab_index: window.active_tab_index,
                 }]
@@ -910,6 +911,7 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                     group_index: group_index.try_into().unwrap_or(0),
                     name: group.name.clone(),
                     active_tab_index: group.active_tab_index.try_into().unwrap_or(0),
+                    color: serde_yaml::to_string(&group.color).ok(),
                 })
                 .collect();
             diesel::insert_into(schema::workspace_groups::dsl::workspace_groups)
@@ -2782,6 +2784,7 @@ fn read_sqlite_data(
             let workspace_groups: Vec<WorkspaceGroupSnapshot> = if groups_for_window.is_empty() {
                 vec![WorkspaceGroupSnapshot {
                     name: "Workspace 1".to_string(),
+                    color: WorkspaceGroupSnapshot::default_color_for_index(0),
                     tabs: saved_tabs_with_groups
                         .iter()
                         .map(|(_, tab)| tab.clone())
@@ -2793,6 +2796,15 @@ fn read_sqlite_data(
                     .iter()
                     .map(|group| WorkspaceGroupSnapshot {
                         name: group.name.clone(),
+                        color: group
+                            .color
+                            .as_deref()
+                            .and_then(|color| serde_yaml::from_str(color).ok())
+                            .unwrap_or_else(|| {
+                                WorkspaceGroupSnapshot::default_color_for_index(
+                                    usize::try_from(group.group_index).unwrap_or(0),
+                                )
+                            }),
                         tabs: saved_tabs_with_groups
                             .iter()
                             .filter(|(workspace_group_id, _)| *workspace_group_id == Some(group.id))

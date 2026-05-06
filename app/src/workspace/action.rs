@@ -109,7 +109,15 @@ pub enum WorkspaceAction {
         index: usize,
         name: String,
     },
+    SetWorkspaceGroupColor {
+        index: usize,
+        color: AnsiColorIdentifier,
+    },
     ToggleWorkspaceGroupContextMenu {
+        index: usize,
+        position: Vector2F,
+    },
+    ToggleWorkspaceGroupColorMenu {
         index: usize,
         position: Vector2F,
     },
@@ -119,6 +127,9 @@ pub enum WorkspaceAction {
         position: RectF,
     },
     DropWorkspaceGroup,
+    ExportWorkspaces,
+    ImportWorkspaces,
+    ImportWorkspacesFromFile(PathBuf),
     CyclePrevSession,
     CycleNextSession,
     MoveActiveTabLeft,
@@ -727,6 +738,7 @@ impl WorkspaceAction {
             | AddWorkspaceGroup
             | CloseWorkspaceGroup(_)
             | SetWorkspaceGroupName { .. }
+            | SetWorkspaceGroupColor { .. }
             | CyclePrevSession
             | CycleNextSession
             | MoveActiveTabLeft
@@ -805,6 +817,9 @@ impl WorkspaceAction {
             | ToggleErrorUnderlining
             | ToggleSyntaxHighlighting
             | OpenLaunchConfigSaveModal
+            | ExportWorkspaces
+            | ImportWorkspaces
+            | ImportWorkspacesFromFile(_)
             | ToggleTabRightClickMenu { .. }
             | ToggleVerticalTabsPaneContextMenu { .. }
             | OpenNewSessionMenu { .. }
@@ -952,6 +967,7 @@ impl WorkspaceAction {
             | FixSettingsWithOz { .. }
             | RenameWorkspaceGroup(_)
             | ToggleWorkspaceGroupContextMenu { .. }
+            | ToggleWorkspaceGroupColorMenu { .. }
             | StartWorkspaceGroupDrag(_)
             | DragWorkspaceGroup { .. }
             | DropWorkspaceGroup

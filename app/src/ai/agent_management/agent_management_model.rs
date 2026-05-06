@@ -67,6 +67,11 @@ impl AgentNotificationsModel {
         &self.notifications
     }
 
+    #[cfg(test)]
+    pub(crate) fn push_notification_for_test(&mut self, item: NotificationItem) {
+        self.notifications.push(item);
+    }
+
     pub(crate) fn mark_item_read(&mut self, id: NotificationId, ctx: &mut ModelContext<Self>) {
         if self.notifications.mark_item_read(id) {
             ctx.emit(AgentManagementEvent::NotificationUpdated);

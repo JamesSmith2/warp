@@ -500,7 +500,7 @@ define_settings_group!(TabSettings, settings: [
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
         toml_path: "appearance.workspace_groups.show_resource_monitor",
-        description: "Whether to show CPU, GPU, and memory usage in the workspace groups panel.",
+        description: "Whether to show Codex, CPU, GPU, and memory usage in the workspace groups panel.",
     },
     show_vertical_tab_panel_in_restored_windows: ShowVerticalTabPanelInRestoredWindows {
         type: bool,

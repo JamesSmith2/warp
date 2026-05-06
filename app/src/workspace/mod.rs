@@ -4,6 +4,7 @@ pub mod bonus_grant_notification_model;
 #[cfg(target_os = "macos")]
 mod cli_install;
 mod close_session_confirmation_dialog;
+mod close_workspace_group_confirmation_dialog;
 pub(crate) mod cross_window_tab_drag;
 pub mod delete_conversation_confirmation_dialog;
 mod global_actions;
@@ -107,6 +108,7 @@ pub fn init(app: &mut AppContext) {
 
     modal::init(app);
     native_modal::init(app);
+    close_workspace_group_confirmation_dialog::init(app);
     lightbox_view::init(app);
     rewind_confirmation_dialog::init(app);
     delete_conversation_confirmation_dialog::init(app);

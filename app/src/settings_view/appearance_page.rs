@@ -4659,7 +4659,10 @@ impl SettingsWidget for WorkspaceResourceMonitorWidget {
                     ctx.dispatch_typed_action(AppearancePageAction::ToggleWorkspaceResourceMonitor);
                 })
                 .finish(),
-            Some("Show CPU, GPU, and memory usage graphs in the workspace sidebar.".to_string()),
+            Some(
+                "Show Codex rate limits, CPU, GPU, and memory usage graphs in the workspace sidebar."
+                    .to_string(),
+            ),
         )
     }
 }

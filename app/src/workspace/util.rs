@@ -109,6 +109,7 @@ pub struct WorkspaceState {
     pub is_header_toolbar_editor_open: bool,
     pub is_import_modal_open: bool,
     pub is_close_session_confirmation_dialog_open: bool,
+    pub is_close_workspace_group_confirmation_dialog_open: bool,
     pub is_rewind_confirmation_dialog_open: bool,
     pub is_delete_conversation_confirmation_dialog_open: bool,
     pub is_native_quit_modal_open: bool,

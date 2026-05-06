@@ -68,9 +68,10 @@ use crate::ai::{
 };
 use crate::ai_assistant::execution_context::WarpAiExecutionContext;
 use crate::app_state::{
-    LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot, NotebookPaneSnapshot,
-    PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot, TabSnapshot,
-    TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot, WorkspaceGroupSnapshot,
+    AppState, LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot,
+    NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot,
+    TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
+    WorkspaceGroupSnapshot,
 };
 use crate::code_review::diff_state::DiffStateModel;
 #[cfg(feature = "local_fs")]
@@ -85,6 +86,10 @@ use crate::projects::ProjectManagementModel;
 use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::system::{SystemInfo, SystemInfoEvent};
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::terminal::cli_agent_sessions::codex_rate_limits::{
+    CodexRateLimitUsageModel, CodexRateLimitUsageModelEvent,
+};
 use crate::terminal::enable_auto_reload_modal::{
     EnableAutoReloadModal, EnableAutoReloadModalEvent,
 };
@@ -167,7 +172,7 @@ use crate::code::editor_management::CodeSource;
 use crate::code_review::telemetry_event::CodeReviewPaneEntrypoint;
 use crate::drive::export::ExportManager;
 use crate::drive::settings::WarpDriveSettings;
-use crate::launch_configs::launch_config::WindowTemplate;
+use crate::launch_configs::launch_config::{LaunchConfig, TabTemplate, WindowTemplate};
 use crate::pane_group::{
     AIFactPane, CodeReviewPanelArg, Direction as PaneGroupDirection, EnvironmentManagementPane,
     ExecutionProfileEditorPane, NetworkLogPane, PaneGroup, PaneId, TerminalPaneId,
@@ -244,7 +249,7 @@ use crate::drive::{
 };
 use crate::experiments::{BlockOnboarding, Experiment};
 use crate::menu::{
-    Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuSelectionSource,
+    Event as MenuEvent, Menu, MenuAction, MenuItem, MenuItemFields, MenuSelectionSource,
     DEFAULT_WIDTH as MENU_DEFAULT_WIDTH,
 };
 use crate::modal::{Modal, ModalEvent, ModalViewState};
@@ -338,6 +343,7 @@ use crate::themes::theme_creator_modal::{ThemeCreatorModal, ThemeCreatorModalEve
 use crate::themes::theme_deletion_modal::{ThemeDeletionModal, ThemeDeletionModalEvent};
 use crate::tips::{TipsEvent, TipsView};
 use crate::ui_components::buttons::{combo_inner_button, icon_button_with_color};
+use crate::ui_components::color_dot::{render_color_dot, TAB_COLOR_OPTIONS};
 use crate::undo_close::UndoCloseStack;
 #[cfg(feature = "local_fs")]
 use crate::user_config::{
@@ -399,6 +405,7 @@ use warp_core::semantic_selection::SemanticSelection;
 use warp_util::path::{user_friendly_path, LineAndColumnArg};
 use warpui::fonts::Weight;
 use warpui::modals::{AlertDialogWithCallbacks, AppModalCallback};
+use warpui::r#async::{SpawnedFutureHandle, Timer};
 
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::clipboard::ClipboardContent;
@@ -425,8 +432,14 @@ use super::action::{
     InitContent, RestoreConversationLayout, TabContextMenuAnchor,
     VerticalTabsPaneContextMenuTarget, WorkspaceAction,
 };
+
+const WORKSPACE_GROUP_NOTIFICATION_FLASH_INTERVAL: Duration = Duration::from_millis(550);
 use super::close_session_confirmation_dialog::{
     CloseSessionConfirmationDialog, CloseSessionConfirmationEvent, OpenDialogSource,
+};
+use super::close_workspace_group_confirmation_dialog::{
+    CloseWorkspaceGroupConfirmationDialog, CloseWorkspaceGroupConfirmationEvent,
+    CloseWorkspaceGroupDialogSource,
 };
 use super::delete_conversation_confirmation_dialog::{
     DeleteConversationConfirmationDialog, DeleteConversationConfirmationEvent,
@@ -497,7 +510,8 @@ use warp_editor::editor::NavigationKey;
 use warpui::keymap::Context;
 use warpui::notification::{RequestPermissionsOutcome, UserNotification};
 use warpui::platform::{
-    Cursor, FilePickerConfiguration, FullscreenState, SystemTheme, TerminationMode,
+    Cursor, FilePickerConfiguration, FileType, FullscreenState, SaveFilePickerConfiguration,
+    SystemTheme, TerminationMode,
 };
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
@@ -904,6 +918,7 @@ pub struct TransferredTab {
 #[derive(Clone)]
 pub(crate) struct WorkspaceGroupData {
     pub(crate) name: String,
+    pub(crate) color: AnsiColorIdentifier,
     pub(crate) tabs: Vec<TabData>,
     pub(crate) active_tab_index: usize,
     pub(crate) mouse_state: MouseStateHandle,
@@ -911,9 +926,10 @@ pub(crate) struct WorkspaceGroupData {
 }
 
 impl WorkspaceGroupData {
-    fn new(name: String) -> Self {
+    fn new(name: String, color: AnsiColorIdentifier) -> Self {
         Self {
             name,
+            color,
             tabs: Vec::new(),
             active_tab_index: 0,
             mouse_state: Default::default(),
@@ -947,6 +963,8 @@ pub struct Workspace {
     show_tab_right_click_menu: Option<(usize, TabContextMenuAnchor)>,
     workspace_group_context_menu: ViewHandle<Menu<WorkspaceAction>>,
     show_workspace_group_context_menu: Option<(usize, Vector2F)>,
+    workspace_group_notification_flash_handle: Option<SpawnedFutureHandle>,
+    workspace_group_notification_flash_on: bool,
     // TODO(CORE-2300): this used to be add_tab_dropdown_menu.
     // Because we are rolling out the change behind a feature flag,
     // keep this comment here until the feature flag is removed.
@@ -983,6 +1001,7 @@ pub struct Workspace {
         Option<PendingSessionConfigTabConfigChipTutorial>,
     new_worktree_modal: ModalViewState<Modal<NewWorktreeModal>>,
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
+    close_workspace_group_confirmation_dialog: ViewHandle<CloseWorkspaceGroupConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
     resource_center_view: ViewHandle<ResourceCenterView>,
@@ -1807,6 +1826,17 @@ impl Workspace {
         );
 
         close_session_confirmation_dialog
+    }
+
+    fn build_close_workspace_group_confirmation_dialog(
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<CloseWorkspaceGroupConfirmationDialog> {
+        let dialog = ctx.add_typed_action_view(CloseWorkspaceGroupConfirmationDialog::new);
+        ctx.subscribe_to_view(&dialog, move |me, _, event, ctx| {
+            me.handle_close_workspace_group_confirmation_dialog_event(event, ctx);
+        });
+
+        dialog
     }
 
     fn build_rewind_confirmation_dialog(
@@ -2679,6 +2709,15 @@ impl Workspace {
                 ctx.notify();
             }
         });
+        #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+        ctx.subscribe_to_model(
+            &CodexRateLimitUsageModel::handle(ctx),
+            |_, _, event, ctx| {
+                if matches!(event, CodexRateLimitUsageModelEvent::Refreshed) {
+                    ctx.notify();
+                }
+            },
+        );
 
         let palette =
             ctx.add_typed_action_view(|ctx| CommandPalette::new(NavigationMode::Normal, ctx));
@@ -3159,7 +3198,10 @@ impl Workspace {
         let mut ws = Self {
             tabs: Vec::new(),
             active_tab_index: 0,
-            workspace_groups: vec![WorkspaceGroupData::new("Workspace 1".to_string())],
+            workspace_groups: vec![WorkspaceGroupData::new(
+                "Workspace 1".to_string(),
+                WorkspaceGroupSnapshot::default_color_for_index(0),
+            )],
             active_workspace_group_index: 0,
             hovered_tab_index: None,
             tab_bar_hover_state: Default::default(),
@@ -3179,6 +3221,10 @@ impl Workspace {
             show_tab_right_click_menu: None,
             workspace_group_context_menu: Self::build_workspace_group_context_menu(ctx),
             show_workspace_group_context_menu: None,
+            workspace_group_notification_flash_handle: None,
+            workspace_group_notification_flash_on: false,
+            close_workspace_group_confirmation_dialog:
+                Self::build_close_workspace_group_confirmation_dialog(ctx),
             new_session_dropdown_menu,
             show_new_session_dropdown_menu: None,
             changelog_model,
@@ -3748,6 +3794,7 @@ impl Workspace {
             | AgentManagementEvent::NotificationUpdated
             | AgentManagementEvent::AllNotificationsMarkedRead => {
                 // Re-render so the vertical tabs panel can update unread-activity dots.
+                self.sync_workspace_group_notification_flash(ctx);
                 ctx.notify();
             }
         }
@@ -3808,11 +3855,88 @@ impl Workspace {
         terminal_view_id: EntityId,
         ctx: &AppContext,
     ) -> bool {
-        self.tabs.iter().any(|tab| {
-            tab.pane_group
-                .as_ref(ctx)
-                .contains_terminal_view(terminal_view_id, ctx)
+        (0..self.workspace_groups.len()).any(|index| {
+            self.tabs_for_workspace_group(index).is_some_and(|tabs| {
+                tabs.iter().any(|tab| {
+                    tab.pane_group
+                        .as_ref(ctx)
+                        .contains_terminal_view(terminal_view_id, ctx)
+                })
+            })
         })
+    }
+
+    pub(super) fn workspace_group_has_unread_notifications(
+        &self,
+        index: usize,
+        app: &AppContext,
+    ) -> bool {
+        let notifications = AgentNotificationsModel::as_ref(app).notifications();
+        self.tabs_for_workspace_group(index).is_some_and(|tabs| {
+            tabs.iter().any(|tab| {
+                let pane_group = tab.pane_group.as_ref(app);
+                pane_group.terminal_pane_ids().into_iter().any(|pane_id| {
+                    pane_group
+                        .terminal_view_from_pane_id(pane_id, app)
+                        .is_some_and(|terminal_view| {
+                            notifications.has_unread_for_terminal_view(terminal_view.id())
+                        })
+                })
+            })
+        })
+    }
+
+    fn has_workspace_group_notification_attention(&self, app: &AppContext) -> bool {
+        (0..self.workspace_groups.len())
+            .any(|index| self.workspace_group_has_unread_notifications(index, app))
+    }
+
+    fn sync_workspace_group_notification_flash(&mut self, ctx: &mut ViewContext<Self>) {
+        if !Self::workspace_groups_enabled(ctx)
+            || !self.has_workspace_group_notification_attention(ctx)
+        {
+            if let Some(handle) = self.workspace_group_notification_flash_handle.take() {
+                handle.abort();
+            }
+            if self.workspace_group_notification_flash_on {
+                self.workspace_group_notification_flash_on = false;
+                ctx.notify();
+            }
+            return;
+        }
+
+        if !self.workspace_group_notification_flash_on {
+            self.workspace_group_notification_flash_on = true;
+            ctx.notify();
+        }
+        self.schedule_workspace_group_notification_flash_tick(ctx);
+    }
+
+    fn schedule_workspace_group_notification_flash_tick(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.workspace_group_notification_flash_handle.is_some() {
+            return;
+        }
+
+        let handle = ctx.spawn_abortable(
+            Timer::after(WORKSPACE_GROUP_NOTIFICATION_FLASH_INTERVAL),
+            |workspace, _, ctx| {
+                workspace.workspace_group_notification_flash_handle = None;
+                if !Self::workspace_groups_enabled(ctx)
+                    || !workspace.has_workspace_group_notification_attention(ctx)
+                {
+                    workspace.workspace_group_notification_flash_on = false;
+                    ctx.notify();
+                    return;
+                }
+
+                workspace.workspace_group_notification_flash_on =
+                    !workspace.workspace_group_notification_flash_on;
+                workspace.schedule_workspace_group_notification_flash_tick(ctx);
+                ctx.notify();
+            },
+            |_, _| {},
+        );
+        self.workspace_group_notification_flash_handle = Some(handle);
     }
 
     fn agent_conversation_event_affects_vertical_tabs(
@@ -4001,6 +4125,11 @@ impl Workspace {
         window: WindowTemplate,
         ctx: &mut ViewContext<Self>,
     ) {
+        if !window.workspace_groups.is_empty() {
+            self.open_launch_config_workspace_groups(window, ctx);
+            return;
+        }
+
         let start_index = self.tabs.len();
 
         window
@@ -4008,12 +4137,7 @@ impl Workspace {
             .iter()
             .enumerate()
             .for_each(|(tab_index, tab_template)| {
-                self.add_tab_with_pane_layout(
-                    PanesLayout::Template(tab_template.layout.clone()),
-                    Arc::new(HashMap::new()),
-                    tab_template.title.clone(),
-                    ctx,
-                );
+                self.add_launch_config_tab_template(tab_template, ctx);
                 self.tabs[start_index + tab_index].selected_color = tab_template
                     .color
                     .map_or(SelectedTabColor::Unset, SelectedTabColor::Color);
@@ -4030,6 +4154,286 @@ impl Workspace {
 
             self.activate_tab_internal(index, ctx);
         }
+    }
+
+    fn add_launch_config_tab_template(
+        &mut self,
+        tab_template: &TabTemplate,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let tab_index = self.tabs.len();
+        self.add_tab_with_pane_layout(
+            PanesLayout::Template(tab_template.layout.clone()),
+            Arc::new(HashMap::new()),
+            tab_template.title.clone(),
+            ctx,
+        );
+        self.tabs[tab_index].selected_color = tab_template
+            .color
+            .map_or(SelectedTabColor::Unset, SelectedTabColor::Color);
+    }
+
+    fn open_launch_config_workspace_groups(
+        &mut self,
+        window: WindowTemplate,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.enable_workspace_groups_for_import(ctx);
+        if !Self::workspace_groups_enabled(ctx) {
+            let mut fallback_window = window;
+            fallback_window.workspace_groups.clear();
+            fallback_window.active_workspace_group_index = None;
+            self.open_launch_config_window(fallback_window, ctx);
+            return;
+        }
+
+        let replaces_empty_initial_group = self.workspace_groups.len() == 1
+            && self.tabs.is_empty()
+            && self.workspace_groups[0].tabs.is_empty();
+        if replaces_empty_initial_group {
+            self.workspace_groups.clear();
+        } else {
+            self.persist_active_workspace_group();
+        }
+
+        let imported_group_start_index = self.workspace_groups.len();
+        let imported_group_count = window.workspace_groups.len();
+        for (group_offset, group_template) in window.workspace_groups.into_iter().enumerate() {
+            let group_color = group_template.color.unwrap_or_else(|| {
+                WorkspaceGroupSnapshot::default_color_for_index(
+                    imported_group_start_index + group_offset,
+                )
+            });
+            self.workspace_groups
+                .push(WorkspaceGroupData::new(group_template.name, group_color));
+            self.tabs.clear();
+            self.active_tab_index = 0;
+
+            if group_template.tabs.is_empty() {
+                self.add_new_session_tab_with_default_mode(
+                    NewSessionSource::Window,
+                    None,
+                    None,
+                    None,
+                    false,
+                    ctx,
+                );
+            } else {
+                for tab_template in &group_template.tabs {
+                    self.add_launch_config_tab_template(tab_template, ctx);
+                }
+            }
+
+            self.active_tab_index = group_template
+                .active_tab_index
+                .unwrap_or_default()
+                .min(self.tabs.len().saturating_sub(1));
+            if let Some(group) = self.workspace_groups.last_mut() {
+                group.tabs = std::mem::take(&mut self.tabs);
+                group.active_tab_index = self.active_tab_index;
+            }
+        }
+
+        let active_imported_group_index = imported_group_start_index
+            + window
+                .active_workspace_group_index
+                .unwrap_or_default()
+                .min(imported_group_count.saturating_sub(1));
+        self.load_workspace_group(active_imported_group_index);
+        self.set_active_tab_index(self.active_tab_index, ctx);
+        self.focus_active_tab(ctx);
+        ctx.notify();
+    }
+
+    fn enable_workspace_groups_for_import(&mut self, ctx: &mut ViewContext<Self>) {
+        if *TabSettings::as_ref(ctx).use_window_workspace_groups {
+            return;
+        }
+
+        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+            report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+        });
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn export_workspaces(&mut self, ctx: &mut ViewContext<Self>) {
+        let app_state = self.current_app_state_for_workspace_export(ctx);
+        let launch_config = LaunchConfig::from_snapshot("Workspaces".to_string(), &app_state);
+        let Ok(yaml) = launch_config.to_yaml_string() else {
+            self.show_workspace_file_toast("Failed to export workspaces.", true, ctx);
+            return;
+        };
+
+        ctx.open_save_file_picker(
+            move |path_opt, workspace, ctx| {
+                let Some(path) = path_opt else {
+                    return;
+                };
+                let path = PathBuf::from(path);
+                match std::fs::write(&path, &yaml) {
+                    Ok(()) => {
+                        workspace.show_workspace_file_toast("Exported workspaces.", false, ctx)
+                    }
+                    Err(error) => {
+                        log::warn!("Failed to export workspaces to {}: {error}", path.display());
+                        workspace.show_workspace_file_toast(
+                            "Failed to export workspaces.",
+                            true,
+                            ctx,
+                        );
+                    }
+                }
+            },
+            SaveFilePickerConfiguration::new()
+                .with_default_filename("warp-workspaces.yaml".to_string()),
+        );
+    }
+
+    #[cfg(not(feature = "local_fs"))]
+    fn export_workspaces(&mut self, ctx: &mut ViewContext<Self>) {
+        self.show_workspace_file_toast("Workspace export is not available here.", true, ctx);
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn import_workspaces(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.open_file_picker(
+            move |result, ctx| {
+                let Ok(paths) = result else {
+                    return;
+                };
+                let Some(path) = paths.into_iter().next() else {
+                    return;
+                };
+                ctx.dispatch_typed_action(&WorkspaceAction::ImportWorkspacesFromFile(
+                    PathBuf::from(path),
+                ));
+            },
+            FilePickerConfiguration::new().set_allowed_file_types(vec![FileType::Yaml]),
+        );
+    }
+
+    #[cfg(not(feature = "local_fs"))]
+    fn import_workspaces(&mut self, ctx: &mut ViewContext<Self>) {
+        self.show_workspace_file_toast("Workspace import is not available here.", true, ctx);
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn import_workspaces_from_file(&mut self, path: &Path, ctx: &mut ViewContext<Self>) {
+        let launch_config = match std::fs::read_to_string(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|contents| LaunchConfig::from_yaml_str(&contents))
+        {
+            Ok(launch_config) => launch_config,
+            Err(error) => {
+                log::warn!(
+                    "Failed to import workspaces from {}: {error}",
+                    path.display()
+                );
+                self.show_workspace_file_toast("Failed to import workspaces.", true, ctx);
+                return;
+            }
+        };
+
+        let Some(import_window) = Self::workspace_import_window_template(launch_config) else {
+            self.show_workspace_file_toast("Failed to import workspaces.", true, ctx);
+            return;
+        };
+
+        self.open_launch_config_window(import_window, ctx);
+        send_telemetry_from_ctx!(
+            TelemetryEvent::OpenLaunchConfig {
+                ui_location: LaunchConfigUiLocation::WorkspacesPanel,
+                open_in_active_window: true,
+            },
+            ctx
+        );
+        self.show_workspace_file_toast("Imported workspaces.", false, ctx);
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn workspace_import_window_template(launch_config: LaunchConfig) -> Option<WindowTemplate> {
+        if launch_config.windows.is_empty() {
+            return None;
+        }
+
+        let window_index = launch_config
+            .active_window_index
+            .unwrap_or_default()
+            .min(launch_config.windows.len() - 1);
+        launch_config.windows.get(window_index).cloned()
+    }
+
+    #[cfg(not(feature = "local_fs"))]
+    fn import_workspaces_from_file(&mut self, _path: &Path, ctx: &mut ViewContext<Self>) {
+        self.show_workspace_file_toast("Workspace import is not available here.", true, ctx);
+    }
+
+    fn current_app_state_for_workspace_export(&self, app: &ViewContext<Self>) -> AppState {
+        let active_window_id = app.windows().active_window();
+        let quake_mode_id = quake_mode_window_id();
+        let current_window_id = app.window_id();
+        let mut active_window_index = None;
+        let mut windows = Vec::new();
+
+        for window_id in app.window_ids() {
+            let quake_mode = quake_mode_id.is_some_and(|id| id == window_id);
+            if quake_mode {
+                continue;
+            }
+
+            let snapshot = if window_id == current_window_id {
+                Some(self.snapshot(window_id, quake_mode, app))
+            } else {
+                WorkspaceRegistry::as_ref(app)
+                    .get(window_id, app)
+                    .and_then(|workspace| {
+                        let workspace = workspace.as_ref(app);
+                        (!workspace.is_tab_drag_preview())
+                            .then(|| workspace.snapshot(window_id, quake_mode, app))
+                    })
+            };
+
+            let Some(snapshot) = snapshot else {
+                continue;
+            };
+            if snapshot.tabs.is_empty()
+                && snapshot
+                    .workspace_groups
+                    .iter()
+                    .all(|group| group.tabs.is_empty())
+            {
+                continue;
+            }
+
+            if active_window_id == Some(window_id) {
+                active_window_index = Some(windows.len());
+            }
+            windows.push(snapshot);
+        }
+
+        AppState {
+            windows,
+            active_window_index,
+            block_lists: Default::default(),
+            running_mcp_servers: Default::default(),
+        }
+    }
+
+    fn show_workspace_file_toast(
+        &self,
+        message: impl Into<String>,
+        is_error: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let message = message.into();
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            let toast = if is_error {
+                DismissibleToast::error(message)
+            } else {
+                DismissibleToast::success(message)
+            };
+            toast_stack.add_ephemeral_toast(toast, ctx);
+        });
     }
 
     fn configure_new_workspace(
@@ -4057,6 +4461,7 @@ impl Workspace {
                 let restored_groups = if window_snapshot.workspace_groups.is_empty() {
                     vec![WorkspaceGroupSnapshot {
                         name: "Workspace 1".to_string(),
+                        color: WorkspaceGroupSnapshot::default_color_for_index(0),
                         tabs: window_snapshot.tabs.clone(),
                         active_tab_index,
                     }]
@@ -4069,7 +4474,7 @@ impl Workspace {
 
                 self.workspace_groups = restored_groups
                     .iter()
-                    .map(|group| WorkspaceGroupData::new(group.name.clone()))
+                    .map(|group| WorkspaceGroupData::new(group.name.clone(), group.color))
                     .collect();
                 self.active_workspace_group_index = active_group_index;
 
@@ -5356,6 +5761,24 @@ impl Workspace {
         ctx.notify();
     }
 
+    fn set_workspace_group_color(
+        &mut self,
+        index: usize,
+        color: AnsiColorIdentifier,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(group) = self.workspace_groups.get_mut(index) else {
+            return;
+        };
+        if group.color == color {
+            return;
+        }
+
+        group.color = color;
+        ctx.dispatch_global_action("workspace:save_app", ());
+        ctx.notify();
+    }
+
     fn clear_workspace_group_name_editor(&mut self, ctx: &mut ViewContext<Self>) {
         self.workspace_group_rename_editor
             .update(ctx, move |editor, ctx| {
@@ -5443,8 +5866,10 @@ impl Workspace {
     fn add_workspace_group(&mut self, ctx: &mut ViewContext<Self>) {
         self.persist_active_workspace_group();
         let next_index = self.workspace_groups.len() + 1;
-        self.workspace_groups
-            .push(WorkspaceGroupData::new(format!("Workspace {next_index}")));
+        self.workspace_groups.push(WorkspaceGroupData::new(
+            format!("Workspace {next_index}"),
+            WorkspaceGroupSnapshot::default_color_for_index(next_index - 1),
+        ));
         self.load_workspace_group(next_index - 1);
         self.add_new_session_tab_with_default_mode(
             NewSessionSource::Window,
@@ -5460,6 +5885,23 @@ impl Workspace {
     }
 
     fn close_workspace_group(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        if self.workspace_groups.len() <= 1 || index >= self.workspace_groups.len() {
+            return;
+        }
+
+        let name = self.workspace_groups[index].name.clone();
+        self.close_workspace_group_context_menu(ctx);
+        self.close_workspace_group_confirmation_dialog
+            .update(ctx, |dialog, _| {
+                dialog.set_source(CloseWorkspaceGroupDialogSource { index, name });
+            });
+        self.current_workspace_state
+            .is_close_workspace_group_confirmation_dialog_open = true;
+        ctx.focus(&self.close_workspace_group_confirmation_dialog);
+        ctx.notify();
+    }
+
+    fn remove_workspace_group(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
         if self.workspace_groups.len() <= 1 || index >= self.workspace_groups.len() {
             return;
         }
@@ -6052,6 +6494,53 @@ impl Workspace {
             .collect::<Vec<_>>()
     }
 
+    fn tabs_for_workspace_group(&self, index: usize) -> Option<&[TabData]> {
+        if index == self.active_workspace_group_index {
+            Some(&self.tabs)
+        } else {
+            self.workspace_groups
+                .get(index)
+                .map(|group| group.tabs.as_slice())
+        }
+    }
+
+    fn find_workspace_group_index_for_pane_group(&self, pane_group_id: EntityId) -> Option<usize> {
+        (0..self.workspace_groups.len()).find(|&index| {
+            self.tabs_for_workspace_group(index)
+                .is_some_and(|tabs| tabs.iter().any(|tab| tab.pane_group.id() == pane_group_id))
+        })
+    }
+
+    fn find_terminal_view_in_tabs(
+        tabs: &[TabData],
+        terminal_view_id: EntityId,
+        ctx: &AppContext,
+    ) -> Option<PaneViewLocator> {
+        tabs.iter().find_map(|tab| {
+            let pane_group = tab.pane_group.as_ref(ctx);
+            let pane_id = pane_group.find_pane_id_for_terminal_view(terminal_view_id, ctx)?;
+            Some(PaneViewLocator {
+                pane_group_id: tab.pane_group.id(),
+                pane_id,
+            })
+        })
+    }
+
+    fn find_workspace_group_index_for_terminal_view(
+        &self,
+        terminal_view_id: EntityId,
+        ctx: &AppContext,
+    ) -> Option<(usize, PaneViewLocator)> {
+        (0..self.workspace_groups.len()).find_map(|index| {
+            let locator = Self::find_terminal_view_in_tabs(
+                self.tabs_for_workspace_group(index)?,
+                terminal_view_id,
+                ctx,
+            )?;
+            Some((index, locator))
+        })
+    }
+
     /// Focuses the given pane within the pane group.
     pub fn focus_pane(&mut self, pane_view_locator: PaneViewLocator, ctx: &mut ViewContext<Self>) {
         if let Some((index, tab)) = self
@@ -6071,6 +6560,18 @@ impl Workspace {
             });
             self.activate_tab_internal(index, ctx);
             ctx.notify();
+            return;
+        }
+
+        if Self::workspace_groups_enabled(ctx) {
+            if let Some(group_index) =
+                self.find_workspace_group_index_for_pane_group(pane_view_locator.pane_group_id)
+            {
+                if group_index != self.active_workspace_group_index {
+                    self.activate_workspace_group(group_index, ctx);
+                    self.focus_pane(pane_view_locator, ctx);
+                }
+            }
         }
     }
 
@@ -6081,18 +6582,19 @@ impl Workspace {
         terminal_view_id: EntityId,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        for tab in self.tabs.iter() {
-            let pane_group_handle = &tab.pane_group;
-            let pane_group = pane_group_handle.as_ref(ctx);
-            if let Some(pane_id) = pane_group.find_pane_id_for_terminal_view(terminal_view_id, ctx)
+        if let Some(locator) = Self::find_terminal_view_in_tabs(&self.tabs, terminal_view_id, ctx) {
+            self.focus_pane(locator, ctx);
+            return true;
+        }
+
+        if Self::workspace_groups_enabled(ctx) {
+            if let Some((group_index, locator)) =
+                self.find_workspace_group_index_for_terminal_view(terminal_view_id, ctx)
             {
-                self.focus_pane(
-                    PaneViewLocator {
-                        pane_group_id: pane_group_handle.id(),
-                        pane_id,
-                    },
-                    ctx,
-                );
+                if group_index != self.active_workspace_group_index {
+                    self.activate_workspace_group(group_index, ctx);
+                }
+                self.focus_pane(locator, ctx);
                 return true;
             }
         }
@@ -6360,6 +6862,71 @@ impl Workspace {
         }
         self.workspace_group_context_menu
             .update(ctx, move |menu, ctx| menu.set_items(items, ctx));
+        self.show_workspace_group_context_menu = Some((index, position));
+        ctx.focus(&self.workspace_group_context_menu);
+        ctx.notify();
+    }
+
+    fn show_workspace_group_color_menu(
+        &mut self,
+        index: usize,
+        position: Vector2F,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(group) = self.workspace_groups.get(index) else {
+            return;
+        };
+
+        let selected_color = group.color;
+        let terminal_colors = Appearance::as_ref(ctx).theme().terminal_colors().normal;
+        let mouse_states: Vec<MouseStateHandle> = (0..TAB_COLOR_OPTIONS.len())
+            .map(|_| MouseStateHandle::default())
+            .collect();
+        let item = MenuItemFields::new_with_custom_label(
+            Arc::new(move |_is_selected, _is_hovered, appearance, _app| {
+                let theme = appearance.theme();
+                let ring_color: ColorU = theme.accent().into();
+                let mut row = Flex::row()
+                    .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_main_axis_size(MainAxisSize::Max);
+
+                for (color, mouse_state) in TAB_COLOR_OPTIONS
+                    .iter()
+                    .copied()
+                    .zip(mouse_states.iter().cloned())
+                {
+                    let dot = render_color_dot(
+                        mouse_state,
+                        color.to_ansi_color(&terminal_colors).into(),
+                        selected_color == color,
+                        ring_color,
+                        false,
+                        theme.foreground(),
+                        color.to_string(),
+                        appearance,
+                    )
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(WorkspaceAction::SetWorkspaceGroupColor {
+                            index,
+                            color,
+                        });
+                        ctx.dispatch_typed_action(MenuAction::Close(true));
+                    });
+
+                    row.add_child(dot.finish());
+                }
+
+                row.finish()
+            }),
+            Some("Workspace color".to_string()),
+        )
+        .no_highlight_on_hover()
+        .with_no_interaction_on_hover()
+        .into_item();
+
+        self.workspace_group_context_menu
+            .update(ctx, move |menu, ctx| menu.set_items(vec![item], ctx));
         self.show_workspace_group_context_menu = Some((index, position));
         ctx.focus(&self.workspace_group_context_menu);
         ctx.notify();
@@ -10467,6 +11034,26 @@ impl Workspace {
         }
     }
 
+    fn handle_close_workspace_group_confirmation_dialog_event(
+        &mut self,
+        event: &CloseWorkspaceGroupConfirmationEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            CloseWorkspaceGroupConfirmationEvent::Cancel => {
+                self.current_workspace_state
+                    .is_close_workspace_group_confirmation_dialog_open = false;
+                ctx.notify();
+            }
+            CloseWorkspaceGroupConfirmationEvent::Confirm { source } => {
+                self.current_workspace_state
+                    .is_close_workspace_group_confirmation_dialog_open = false;
+                self.remove_workspace_group(source.index, ctx);
+                ctx.notify();
+            }
+        }
+    }
+
     fn handle_rewind_confirmation_dialog_event(
         &mut self,
         event: &RewindConfirmationEvent,
@@ -10711,6 +11298,7 @@ impl Workspace {
                 };
                 WorkspaceGroupSnapshot {
                     name: group.name.clone(),
+                    color: group.color,
                     tabs: group_tabs,
                     active_tab_index: if index == self.active_workspace_group_index {
                         active_tab_index
@@ -20628,8 +21216,14 @@ impl TypedActionView for Workspace {
             SetWorkspaceGroupName { index, name } => {
                 self.set_workspace_group_name(*index, name, ctx)
             }
+            SetWorkspaceGroupColor { index, color } => {
+                self.set_workspace_group_color(*index, *color, ctx)
+            }
             ToggleWorkspaceGroupContextMenu { index, position } => {
                 self.show_workspace_group_context_menu(*index, *position, ctx)
+            }
+            ToggleWorkspaceGroupColorMenu { index, position } => {
+                self.show_workspace_group_color_menu(*index, *position, ctx)
             }
             StartWorkspaceGroupDrag(index) => {
                 if *index < self.workspace_groups.len() {
@@ -20644,6 +21238,9 @@ impl TypedActionView for Workspace {
                 self.current_workspace_state.is_tab_being_dragged = false;
                 ctx.notify();
             }
+            ExportWorkspaces => self.export_workspaces(ctx),
+            ImportWorkspaces => self.import_workspaces(ctx),
+            ImportWorkspacesFromFile(path) => self.import_workspaces_from_file(path, ctx),
             OpenLaunchConfigSaveModal => self.open_launch_config_save_modal(ctx),
             ActivateNextTab => self.activate_next_tab(ctx),
             ActivateLastTab => self.activate_last_tab(ctx),
@@ -23651,6 +24248,21 @@ impl View for Workspace {
         {
             stack.add_positioned_overlay_child(
                 ChildView::new(&self.close_session_confirmation_dialog).finish(),
+                OffsetPositioning::offset_from_parent(
+                    Vector2F::zero(),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::Center,
+                    ChildAnchor::Center,
+                ),
+            );
+        }
+
+        if self
+            .current_workspace_state
+            .is_close_workspace_group_confirmation_dialog_open
+        {
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.close_workspace_group_confirmation_dialog).finish(),
                 OffsetPositioning::offset_from_parent(
                     Vector2F::zero(),
                     ParentOffsetBounds::WindowByPosition,

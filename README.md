@@ -34,10 +34,11 @@ This branch adds a window-local workspace grouping surface and a measured GPU-pe
 ### Workspace Groups
 
 - Added window-local workspace groups behind the `WindowWorkspaceGroups` feature and the `appearance.workspace_groups.enabled` setting.
-- Added a left-side `Workspaces` panel that can activate, add, rename, close, and drag-reorder workspace groups.
+- Added a left-side `Workspaces` panel that can activate, add, rename, close, color, import/export, and drag-reorder workspace groups.
 - Scoped tabs to the active workspace group: switching groups saves the current tabs and active tab, then restores the selected group's tabs.
-- Extended workspace/session snapshots so group names, group tabs, and the active workspace group are restored with the window.
-- Added a panel footer with current process CPU, Metal GPU active-time usage, and memory footprint.
+- Extended workspace/session snapshots so group names, group colors, group tabs, and the active workspace group are restored with the window.
+- Added direct row controls for workspace color and close, with a confirmation dialog before every workspace group removal.
+- Added a panel footer with Codex rate-limit status, current process CPU, Metal GPU active-time usage, and memory footprint.
 
 ### Rendering and GPU Load
 

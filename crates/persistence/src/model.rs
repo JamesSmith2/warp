@@ -370,6 +370,7 @@ pub struct WorkspaceGroup {
     pub group_index: i32,
     pub name: String,
     pub active_tab_index: i32,
+    pub color: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -379,6 +380,7 @@ pub struct NewWorkspaceGroup {
     pub group_index: i32,
     pub name: String,
     pub active_tab_index: i32,
+    pub color: Option<String>,
 }
 
 /// The panes data model includes pane_nodes, pane_leaves and pane_branches.

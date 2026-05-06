@@ -1,4 +1,7 @@
 use super::*;
+use crate::ai::agent_management::notifications::{
+    NotificationCategory, NotificationItem, NotificationOrigin, NotificationSourceAgent,
+};
 use crate::ai::blocklist::{BlocklistAIHistoryModel, BlocklistAIPermissions};
 use crate::ai::document::ai_document_model::AIDocumentModel;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
@@ -30,6 +33,7 @@ use repo_metadata::CanonicalizedPath;
 use repo_metadata::RepoMetadataModel;
 use session_sharing_protocol::sharer::SessionSourceType;
 use std::collections::HashMap;
+use std::path::PathBuf;
 #[cfg(feature = "local_fs")]
 use tempfile::TempDir;
 use watcher::HomeDirectoryWatcher;
@@ -47,8 +51,11 @@ use crate::settings_view::DisplayCount;
 use crate::system::SystemInfo;
 use crate::system::SystemStats;
 use crate::tab_configs::tab_config::{TabConfigPaneNode, TabConfigPaneType};
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::terminal::cli_agent_sessions::codex_rate_limits::CodexRateLimitUsageModel;
 use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
+use crate::terminal::CLIAgent;
 #[cfg(windows)]
 use crate::util::traffic_lights::windows::RendererState;
 use crate::workspaces::team_tester::TeamTesterStatus;
@@ -101,6 +108,8 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(|_| SystemStats::new());
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     app.add_singleton_model(SystemInfo::new);
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    app.add_singleton_model(CodexRateLimitUsageModel::new_for_test);
     app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(CloudModel::mock);
     app.add_singleton_model(UserWorkspaces::default_mock);
@@ -284,6 +293,23 @@ fn restored_workspace_group_test_tab(title: &str) -> crate::app_state::TabSnapsh
         selected_color: SelectedTabColor::default(),
         left_panel: None,
         right_panel: None,
+    }
+}
+
+fn launch_config_workspace_tab(
+    title: &str,
+    cwd: &str,
+) -> crate::launch_configs::launch_config::TabTemplate {
+    crate::launch_configs::launch_config::TabTemplate {
+        title: Some(title.to_string()),
+        layout: crate::launch_configs::launch_config::PaneTemplateType::PaneTemplate {
+            cwd: PathBuf::from(cwd),
+            commands: vec![],
+            is_focused: Some(true),
+            pane_mode: crate::launch_configs::launch_config::PaneMode::Terminal,
+            shell: None,
+        },
+        color: None,
     }
 }
 
@@ -2658,6 +2684,91 @@ fn test_window_workspace_groups_rename_trims_and_ignores_empty_names() {
 }
 
 #[test]
+fn test_window_workspace_groups_set_color_updates_target_group() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            workspace.handle_action(
+                &WorkspaceAction::SetWorkspaceGroupColor {
+                    index: 0,
+                    color: AnsiColorIdentifier::Magenta,
+                },
+                ctx,
+            );
+
+            assert_eq!(
+                workspace.workspace_groups[0].color,
+                AnsiColorIdentifier::Magenta
+            );
+            assert_eq!(
+                workspace.workspace_groups[1].color,
+                crate::app_state::WorkspaceGroupSnapshot::default_color_for_index(1)
+            );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_close_requires_confirmation() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+
+            workspace.handle_action(&WorkspaceAction::CloseWorkspaceGroup(0), ctx);
+            assert!(workspace
+                .current_workspace_state
+                .is_close_workspace_group_confirmation_dialog_open);
+            assert_eq!(workspace.workspace_group_count(), 2);
+
+            workspace.handle_close_workspace_group_confirmation_dialog_event(
+                &crate::workspace::close_workspace_group_confirmation_dialog::CloseWorkspaceGroupConfirmationEvent::Cancel,
+                ctx,
+            );
+            assert!(!workspace
+                .current_workspace_state
+                .is_close_workspace_group_confirmation_dialog_open);
+            assert_eq!(workspace.workspace_group_count(), 2);
+
+            workspace.handle_action(&WorkspaceAction::CloseWorkspaceGroup(0), ctx);
+            workspace.handle_close_workspace_group_confirmation_dialog_event(
+                &crate::workspace::close_workspace_group_confirmation_dialog::CloseWorkspaceGroupConfirmationEvent::Confirm {
+                    source: crate::workspace::close_workspace_group_confirmation_dialog::CloseWorkspaceGroupDialogSource {
+                        index: 0,
+                        name: "Workspace 1".to_string(),
+                    },
+                },
+                ctx,
+            );
+
+            assert_eq!(workspace.workspace_group_count(), 1);
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+        });
+    });
+}
+
+#[test]
 fn test_window_workspace_groups_reorder_preserves_active_workspace_and_tabs() {
     let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
 
@@ -2709,6 +2820,128 @@ fn test_window_workspace_groups_reorder_preserves_active_workspace_and_tabs() {
 }
 
 #[test]
+fn test_window_workspace_groups_focus_pane_switches_to_inactive_group() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+
+            let inactive_pane_group = workspace.workspace_groups[0].tabs[0].pane_group.clone();
+            let locator = PaneViewLocator {
+                pane_group_id: inactive_pane_group.id(),
+                pane_id: inactive_pane_group.as_ref(ctx).focused_pane_id(ctx),
+            };
+
+            workspace.focus_pane(locator, ctx);
+
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(
+                workspace.active_tab_pane_group().id(),
+                locator.pane_group_id
+            );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_focus_terminal_switches_to_inactive_group() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+
+            let inactive_pane_group = workspace.workspace_groups[0].tabs[0].pane_group.clone();
+            let terminal_view_id = inactive_pane_group
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .expect("inactive group should have a focused terminal")
+                .id();
+
+            workspace.handle_action(
+                &WorkspaceAction::FocusTerminalViewInWorkspace { terminal_view_id },
+                ctx,
+            );
+
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(
+                workspace.active_tab_pane_group().id(),
+                inactive_pane_group.id()
+            );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_detects_unread_notifications_in_inactive_group() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+
+            let inactive_pane_group = workspace.workspace_groups[0].tabs[0].pane_group.clone();
+            let terminal_view_id = inactive_pane_group
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .expect("inactive group should have a focused terminal")
+                .id();
+
+            AgentNotificationsModel::handle(ctx).update(ctx, |model, _| {
+                model.push_notification_for_test(NotificationItem::new(
+                    "Codex finished".to_string(),
+                    "Notification from Codex".to_string(),
+                    NotificationCategory::Complete,
+                    NotificationSourceAgent::CLI {
+                        agent: CLIAgent::Codex,
+                        is_ambient: false,
+                    },
+                    NotificationOrigin::CLISession(terminal_view_id),
+                    false,
+                    terminal_view_id,
+                    vec![],
+                    None,
+                ));
+            });
+
+            assert!(workspace.workspace_group_has_unread_notifications(0, ctx));
+            assert!(!workspace.workspace_group_has_unread_notifications(1, ctx));
+        });
+    });
+}
+
+#[test]
 fn test_window_workspace_groups_suppress_vertical_tabs_ui_without_changing_setting() {
     let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
     let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
@@ -2753,6 +2986,7 @@ fn test_window_workspace_groups_restore_inactive_group_tabs_and_active_tab() {
                 vec![
                     crate::app_state::WorkspaceGroupSnapshot {
                         name: "Backend".to_string(),
+                        color: AnsiColorIdentifier::Green,
                         tabs: vec![
                             restored_workspace_group_test_tab("API"),
                             restored_workspace_group_test_tab("Worker"),
@@ -2761,6 +2995,7 @@ fn test_window_workspace_groups_restore_inactive_group_tabs_and_active_tab() {
                     },
                     crate::app_state::WorkspaceGroupSnapshot {
                         name: "Ops".to_string(),
+                        color: AnsiColorIdentifier::Magenta,
                         tabs: vec![restored_workspace_group_test_tab("Deploy")],
                         active_tab_index: 0,
                     },
@@ -2814,11 +3049,13 @@ fn test_window_workspace_groups_restore_empty_groups_with_default_session() {
                 vec![
                     crate::app_state::WorkspaceGroupSnapshot {
                         name: "Empty".to_string(),
+                        color: AnsiColorIdentifier::Blue,
                         tabs: vec![],
                         active_tab_index: 0,
                     },
                     crate::app_state::WorkspaceGroupSnapshot {
                         name: "Saved".to_string(),
+                        color: AnsiColorIdentifier::Cyan,
                         tabs: vec![restored_workspace_group_test_tab("Saved tab")],
                         active_tab_index: 0,
                     },
@@ -2847,6 +3084,233 @@ fn test_window_workspace_groups_restore_empty_groups_with_default_session() {
             assert_eq!(workspace.active_workspace_group_index(), 0);
             assert_eq!(workspace.tab_count(), 1);
         });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_open_launch_config_restores_imported_groups() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        let window_template = crate::launch_configs::launch_config::WindowTemplate {
+            active_tab_index: Some(0),
+            active_workspace_group_index: Some(1),
+            workspace_groups: vec![
+                crate::launch_configs::launch_config::WorkspaceGroupTemplate {
+                    name: "Backend".to_string(),
+                    color: Some(AnsiColorIdentifier::Green),
+                    active_tab_index: Some(1),
+                    tabs: vec![
+                        launch_config_workspace_tab("API", "/repo/api"),
+                        launch_config_workspace_tab("Worker", "/repo/worker"),
+                    ],
+                },
+                crate::launch_configs::launch_config::WorkspaceGroupTemplate {
+                    name: "Ops".to_string(),
+                    color: Some(AnsiColorIdentifier::Magenta),
+                    active_tab_index: Some(0),
+                    tabs: vec![launch_config_workspace_tab("Deploy", "/repo/deploy")],
+                },
+            ],
+            tabs: vec![],
+        };
+
+        let (_, workspace) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            Workspace::new(
+                global_resource_handles,
+                None,
+                NewWorkspaceSource::FromTemplate { window_template },
+                ctx,
+            )
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(*TabSettings::as_ref(ctx).use_window_workspace_groups);
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert_eq!(
+                workspace.workspace_groups[0].color,
+                AnsiColorIdentifier::Green
+            );
+            assert_eq!(
+                workspace.workspace_groups[1].color,
+                AnsiColorIdentifier::Magenta
+            );
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .display_title(ctx),
+                "Deploy"
+            );
+
+            workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(0), ctx);
+            assert_eq!(workspace.tab_count(), 2);
+            assert_eq!(workspace.active_tab_index(), 1);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .display_title(ctx),
+                "Worker"
+            );
+        });
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_window_workspace_groups_imports_active_yaml_window_into_current_window() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let import_path = temp_dir.path().join("workspaces.yaml");
+        let launch_config = crate::launch_configs::launch_config::LaunchConfig {
+            name: "Imported workspaces".to_string(),
+            active_window_index: Some(1),
+            windows: vec![
+                crate::launch_configs::launch_config::WindowTemplate {
+                    active_tab_index: Some(0),
+                    active_workspace_group_index: Some(0),
+                    workspace_groups: vec![
+                        crate::launch_configs::launch_config::WorkspaceGroupTemplate {
+                            name: "Ignored".to_string(),
+                            color: None,
+                            active_tab_index: Some(0),
+                            tabs: vec![launch_config_workspace_tab("Ignored tab", "/repo/ignored")],
+                        },
+                    ],
+                    tabs: vec![],
+                },
+                crate::launch_configs::launch_config::WindowTemplate {
+                    active_tab_index: Some(0),
+                    active_workspace_group_index: Some(1),
+                    workspace_groups: vec![
+                        crate::launch_configs::launch_config::WorkspaceGroupTemplate {
+                            name: "Backend".to_string(),
+                            color: Some(AnsiColorIdentifier::Green),
+                            active_tab_index: Some(1),
+                            tabs: vec![
+                                launch_config_workspace_tab("API", "/repo/api"),
+                                launch_config_workspace_tab("Worker", "/repo/worker"),
+                            ],
+                        },
+                        crate::launch_configs::launch_config::WorkspaceGroupTemplate {
+                            name: "Ops".to_string(),
+                            color: Some(AnsiColorIdentifier::Magenta),
+                            active_tab_index: Some(0),
+                            tabs: vec![launch_config_workspace_tab("Deploy", "/repo/deploy")],
+                        },
+                    ],
+                    tabs: vec![],
+                },
+            ],
+        };
+        std::fs::write(
+            &import_path,
+            launch_config
+                .to_yaml_string()
+                .expect("launch config should serialize"),
+        )
+        .expect("workspace import file should be written");
+
+        let window_count_before = app.read(|ctx| ctx.window_ids().count());
+        let workspace_group_count_before =
+            workspace.read(&app, |workspace, _| workspace.workspace_group_count());
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.import_workspaces_from_file(&import_path, ctx);
+            assert!(*TabSettings::as_ref(ctx).use_window_workspace_groups);
+            assert_eq!(
+                workspace.workspace_group_count(),
+                workspace_group_count_before + 2
+            );
+            assert_eq!(
+                workspace.active_workspace_group_index(),
+                workspace_group_count_before + 1
+            );
+            assert_eq!(
+                workspace.workspace_groups[workspace_group_count_before].color,
+                AnsiColorIdentifier::Green
+            );
+            assert_eq!(
+                workspace.workspace_groups[workspace_group_count_before + 1].color,
+                AnsiColorIdentifier::Magenta
+            );
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .display_title(ctx),
+                "Deploy"
+            );
+
+            workspace.handle_action(
+                &WorkspaceAction::ActivateWorkspaceGroup(workspace_group_count_before),
+                ctx,
+            );
+            assert_eq!(workspace.tab_count(), 2);
+            assert_eq!(workspace.active_tab_index(), 1);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .display_title(ctx),
+                "Worker"
+            );
+        });
+
+        let window_count_after = app.read(|ctx| ctx.window_ids().count());
+        assert_eq!(window_count_after, window_count_before);
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_window_workspace_groups_import_rejects_empty_yaml_without_mutating_workspace() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let import_path = temp_dir.path().join("empty-workspaces.yaml");
+        let launch_config = crate::launch_configs::launch_config::LaunchConfig {
+            name: "Empty".to_string(),
+            active_window_index: Some(0),
+            windows: vec![],
+        };
+        std::fs::write(
+            &import_path,
+            launch_config
+                .to_yaml_string()
+                .expect("launch config should serialize"),
+        )
+        .expect("workspace import file should be written");
+
+        let window_count_before = app.read(|ctx| ctx.window_ids().count());
+        let workspace_group_count_before =
+            workspace.read(&app, |workspace, _| workspace.workspace_group_count());
+        let tab_count_before = workspace.read(&app, |workspace, _| workspace.tab_count());
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.import_workspaces_from_file(&import_path, ctx);
+            assert_eq!(
+                workspace.workspace_group_count(),
+                workspace_group_count_before
+            );
+            assert_eq!(workspace.tab_count(), tab_count_before);
+        });
+
+        let window_count_after = app.read(|ctx| ctx.window_ids().count());
+        assert_eq!(window_count_after, window_count_before);
     });
 }
 

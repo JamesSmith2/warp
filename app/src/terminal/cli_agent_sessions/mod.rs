@@ -1,3 +1,5 @@
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+pub(crate) mod codex_rate_limits;
 pub mod event;
 pub mod listener;
 #[cfg(not(target_family = "wasm"))]

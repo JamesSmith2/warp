@@ -659,6 +659,7 @@ pub enum LaunchConfigUiLocation {
     AppMenu,
     TabMenu,
     Uri,
+    WorkspacesPanel,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

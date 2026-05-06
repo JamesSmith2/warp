@@ -459,6 +459,7 @@ diesel::table! {
         group_index -> Integer,
         name -> Text,
         active_tab_index -> Integer,
+        color -> Nullable<Text>,
     }
 }
 
