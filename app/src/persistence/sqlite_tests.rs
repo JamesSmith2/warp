@@ -6,7 +6,7 @@ use warp_graphql::scalars::time::ServerTimestamp;
 use crate::{
     app_state::{
         AppState, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents, LeafSnapshot,
-        PaneNodeSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+        PaneNodeSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkspaceGroupColor,
         WorkspaceGroupSnapshot,
     },
     cloud_object::{CloudObjectPermissions, Owner},
@@ -17,7 +17,6 @@ use crate::{
     tab::SelectedTabColor,
     terminal::model::block::SerializedBlock,
     terminal::ShellLaunchData,
-    themes::theme::AnsiColorIdentifier,
 };
 
 use super::{
@@ -226,13 +225,13 @@ fn test_sqlite_round_trips_window_workspace_groups() {
             workspace_groups: vec![
                 WorkspaceGroupSnapshot {
                     name: "Backend".to_string(),
-                    color: AnsiColorIdentifier::Green,
+                    color: WorkspaceGroupColor::Green,
                     tabs: vec![first_tab, third_tab],
                     active_tab_index: 1,
                 },
                 WorkspaceGroupSnapshot {
                     name: "Production".to_string(),
-                    color: AnsiColorIdentifier::Magenta,
+                    color: WorkspaceGroupColor::Magenta,
                     tabs: vec![second_tab],
                     active_tab_index: 0,
                 },
@@ -266,10 +265,10 @@ fn test_sqlite_round_trips_window_workspace_groups() {
     assert_eq!(window.workspace_groups.len(), 2);
     assert_eq!(window.workspace_groups[0].name, "Backend");
     assert_eq!(window.workspace_groups[1].name, "Production");
-    assert_eq!(window.workspace_groups[0].color, AnsiColorIdentifier::Green);
+    assert_eq!(window.workspace_groups[0].color, WorkspaceGroupColor::Green);
     assert_eq!(
         window.workspace_groups[1].color,
-        AnsiColorIdentifier::Magenta
+        WorkspaceGroupColor::Magenta
     );
     assert_eq!(window.workspace_groups[0].active_tab_index, 1);
     assert_eq!(window.workspace_groups[0].tabs.len(), 2);
@@ -314,13 +313,13 @@ fn test_sqlite_round_trips_empty_window_workspace_group() {
             workspace_groups: vec![
                 WorkspaceGroupSnapshot {
                     name: "Empty".to_string(),
-                    color: AnsiColorIdentifier::Blue,
+                    color: WorkspaceGroupColor::Blue,
                     tabs: vec![],
                     active_tab_index: 0,
                 },
                 WorkspaceGroupSnapshot {
                     name: "Saved".to_string(),
-                    color: AnsiColorIdentifier::Cyan,
+                    color: WorkspaceGroupColor::Cyan,
                     tabs: vec![saved_tab],
                     active_tab_index: 0,
                 },
@@ -354,10 +353,10 @@ fn test_sqlite_round_trips_empty_window_workspace_group() {
     assert!(window.tabs.is_empty());
     assert_eq!(window.workspace_groups.len(), 2);
     assert_eq!(window.workspace_groups[0].name, "Empty");
-    assert_eq!(window.workspace_groups[0].color, AnsiColorIdentifier::Blue);
+    assert_eq!(window.workspace_groups[0].color, WorkspaceGroupColor::Blue);
     assert!(window.workspace_groups[0].tabs.is_empty());
     assert_eq!(window.workspace_groups[1].name, "Saved");
-    assert_eq!(window.workspace_groups[1].color, AnsiColorIdentifier::Cyan);
+    assert_eq!(window.workspace_groups[1].color, WorkspaceGroupColor::Cyan);
     assert_eq!(window.workspace_groups[1].tabs.len(), 1);
 }
 

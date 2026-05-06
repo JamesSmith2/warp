@@ -1,3 +1,4 @@
+use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -64,23 +65,120 @@ pub struct WindowSnapshot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceGroupSnapshot {
     pub name: String,
-    pub color: AnsiColorIdentifier,
+    pub color: WorkspaceGroupColor,
     pub tabs: Vec<TabSnapshot>,
     pub active_tab_index: usize,
 }
 
 impl WorkspaceGroupSnapshot {
-    pub(crate) fn default_color_for_index(index: usize) -> AnsiColorIdentifier {
-        const DEFAULT_COLORS: [AnsiColorIdentifier; 6] = [
-            AnsiColorIdentifier::Red,
-            AnsiColorIdentifier::Green,
-            AnsiColorIdentifier::Yellow,
-            AnsiColorIdentifier::Blue,
-            AnsiColorIdentifier::Magenta,
-            AnsiColorIdentifier::Cyan,
-        ];
+    pub(crate) fn default_color_for_index(index: usize) -> WorkspaceGroupColor {
+        WorkspaceGroupColor::OPTIONS[index % WorkspaceGroupColor::OPTIONS.len()]
+    }
+}
 
-        DEFAULT_COLORS[index % DEFAULT_COLORS.len()]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceGroupColor {
+    Red,
+    Orange,
+    Amber,
+    Yellow,
+    Lime,
+    Green,
+    Emerald,
+    Teal,
+    Cyan,
+    Sky,
+    Blue,
+    Indigo,
+    Violet,
+    Purple,
+    Magenta,
+    Fuchsia,
+    Pink,
+    Rose,
+    Brown,
+    Slate,
+    Black,
+    White,
+}
+
+impl WorkspaceGroupColor {
+    pub(crate) const OPTIONS: [Self; 20] = [
+        Self::Red,
+        Self::Orange,
+        Self::Amber,
+        Self::Yellow,
+        Self::Lime,
+        Self::Green,
+        Self::Emerald,
+        Self::Teal,
+        Self::Cyan,
+        Self::Sky,
+        Self::Blue,
+        Self::Indigo,
+        Self::Violet,
+        Self::Purple,
+        Self::Magenta,
+        Self::Fuchsia,
+        Self::Pink,
+        Self::Rose,
+        Self::Brown,
+        Self::Slate,
+    ];
+
+    pub(crate) fn to_color_u(self) -> ColorU {
+        ColorU::from_u32(match self {
+            Self::Red => 0xef4444ff,
+            Self::Orange => 0xf97316ff,
+            Self::Amber => 0xf59e0bff,
+            Self::Yellow => 0xeab308ff,
+            Self::Lime => 0x84cc16ff,
+            Self::Green => 0x22c55eff,
+            Self::Emerald => 0x10b981ff,
+            Self::Teal => 0x14b8a6ff,
+            Self::Cyan => 0x06b6d4ff,
+            Self::Sky => 0x0ea5e9ff,
+            Self::Blue => 0x3b82f6ff,
+            Self::Indigo => 0x6366f1ff,
+            Self::Violet => 0x8b5cf6ff,
+            Self::Purple => 0xa855f7ff,
+            Self::Magenta => 0xc026d3ff,
+            Self::Fuchsia => 0xd946efff,
+            Self::Pink => 0xec4899ff,
+            Self::Rose => 0xf43f5eff,
+            Self::Brown => 0xa16207ff,
+            Self::Slate => 0x64748bff,
+            Self::Black => 0x475569ff,
+            Self::White => 0xcbd5e1ff,
+        })
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Amber => "Amber",
+            Self::Yellow => "Yellow",
+            Self::Lime => "Lime",
+            Self::Green => "Green",
+            Self::Emerald => "Emerald",
+            Self::Teal => "Teal",
+            Self::Cyan => "Cyan",
+            Self::Sky => "Sky",
+            Self::Blue => "Blue",
+            Self::Indigo => "Indigo",
+            Self::Violet => "Violet",
+            Self::Purple => "Purple",
+            Self::Magenta => "Magenta",
+            Self::Fuchsia => "Fuchsia",
+            Self::Pink => "Pink",
+            Self::Rose => "Rose",
+            Self::Brown => "Brown",
+            Self::Slate => "Slate",
+            Self::Black => "Black",
+            Self::White => "White",
+        }
     }
 }
 

@@ -99,3 +99,31 @@ fn remove_by_origin_returns_false_when_nothing_to_remove() {
     let removed = items.remove_by_origin(NotificationOrigin::CLISession(terminal_view_id));
     assert!(!removed);
 }
+
+#[test]
+fn unread_count_for_terminal_view_counts_only_unread_matches() {
+    let mut items = NotificationItems::default();
+    let terminal_a = EntityId::new();
+    let terminal_b = EntityId::new();
+    let read_conversation_id = AIConversationId::new();
+
+    items.push(make_conversation_notification(
+        AIConversationId::new(),
+        terminal_a,
+    ));
+    items.push(make_cli_session_notification(terminal_b));
+    items.push(NotificationItem::new(
+        "read".to_owned(),
+        "msg".to_owned(),
+        NotificationCategory::Complete,
+        NotificationSourceAgent::Oz { is_ambient: false },
+        NotificationOrigin::Conversation(read_conversation_id),
+        true,
+        terminal_a,
+        vec![],
+        None,
+    ));
+
+    assert_eq!(items.unread_count_for_terminal_view(terminal_a), 1);
+    assert_eq!(items.unread_count_for_terminal_view(terminal_b), 1);
+}

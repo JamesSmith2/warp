@@ -70,7 +70,7 @@ use crate::ai_assistant::execution_context::WarpAiExecutionContext;
 use crate::app_state::{
     AppState, LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot,
     NotebookPaneSnapshot, PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot,
-    TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
+    TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot, WorkspaceGroupColor,
     WorkspaceGroupSnapshot,
 };
 use crate::code_review::diff_state::DiffStateModel;
@@ -88,7 +88,7 @@ use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::system::{SystemInfo, SystemInfoEvent};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::terminal::cli_agent_sessions::codex_rate_limits::{
-    CodexRateLimitUsageModel, CodexRateLimitUsageModelEvent,
+    CodexRateLimitUsageModel, CodexRateLimitUsageModelEvent, CodexRateLimitWindowKind,
 };
 use crate::terminal::enable_auto_reload_modal::{
     EnableAutoReloadModal, EnableAutoReloadModalEvent,
@@ -343,7 +343,7 @@ use crate::themes::theme_creator_modal::{ThemeCreatorModal, ThemeCreatorModalEve
 use crate::themes::theme_deletion_modal::{ThemeDeletionModal, ThemeDeletionModalEvent};
 use crate::tips::{TipsEvent, TipsView};
 use crate::ui_components::buttons::{combo_inner_button, icon_button_with_color};
-use crate::ui_components::color_dot::{render_color_dot, TAB_COLOR_OPTIONS};
+use crate::ui_components::color_dot::render_color_dot;
 use crate::undo_close::UndoCloseStack;
 #[cfg(feature = "local_fs")]
 use crate::user_config::{
@@ -918,7 +918,7 @@ pub struct TransferredTab {
 #[derive(Clone)]
 pub(crate) struct WorkspaceGroupData {
     pub(crate) name: String,
-    pub(crate) color: AnsiColorIdentifier,
+    pub(crate) color: WorkspaceGroupColor,
     pub(crate) tabs: Vec<TabData>,
     pub(crate) active_tab_index: usize,
     pub(crate) mouse_state: MouseStateHandle,
@@ -926,7 +926,7 @@ pub(crate) struct WorkspaceGroupData {
 }
 
 impl WorkspaceGroupData {
-    fn new(name: String, color: AnsiColorIdentifier) -> Self {
+    fn new(name: String, color: WorkspaceGroupColor) -> Self {
         Self {
             name,
             color,
@@ -2712,8 +2712,18 @@ impl Workspace {
         #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
         ctx.subscribe_to_model(
             &CodexRateLimitUsageModel::handle(ctx),
-            |_, _, event, ctx| {
-                if matches!(event, CodexRateLimitUsageModelEvent::Refreshed) {
+            |me, _, event, ctx| {
+                match event {
+                    CodexRateLimitUsageModelEvent::Refreshed => {}
+                    CodexRateLimitUsageModelEvent::LimitReset { kind } => {
+                        me.show_codex_rate_limit_reset_toast(*kind, ctx);
+                    }
+                }
+                if matches!(
+                    event,
+                    CodexRateLimitUsageModelEvent::Refreshed
+                        | CodexRateLimitUsageModelEvent::LimitReset { .. }
+                ) {
                     ctx.notify();
                 }
             },
@@ -3871,19 +3881,34 @@ impl Workspace {
         index: usize,
         app: &AppContext,
     ) -> bool {
+        self.workspace_group_unread_notification_count(index, app) > 0
+    }
+
+    pub(super) fn workspace_group_unread_notification_count(
+        &self,
+        index: usize,
+        app: &AppContext,
+    ) -> usize {
         let notifications = AgentNotificationsModel::as_ref(app).notifications();
-        self.tabs_for_workspace_group(index).is_some_and(|tabs| {
-            tabs.iter().any(|tab| {
-                let pane_group = tab.pane_group.as_ref(app);
-                pane_group.terminal_pane_ids().into_iter().any(|pane_id| {
-                    pane_group
-                        .terminal_view_from_pane_id(pane_id, app)
-                        .is_some_and(|terminal_view| {
-                            notifications.has_unread_for_terminal_view(terminal_view.id())
-                        })
-                })
+        self.tabs_for_workspace_group(index)
+            .map(|tabs| {
+                tabs.iter()
+                    .map(|tab| {
+                        let pane_group = tab.pane_group.as_ref(app);
+                        pane_group
+                            .terminal_pane_ids()
+                            .into_iter()
+                            .filter_map(|pane_id| {
+                                pane_group.terminal_view_from_pane_id(pane_id, app)
+                            })
+                            .map(|terminal_view| {
+                                notifications.unread_count_for_terminal_view(terminal_view.id())
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum()
             })
-        })
+            .unwrap_or_default()
     }
 
     fn has_workspace_group_notification_attention(&self, app: &AppContext) -> bool {
@@ -4433,6 +4458,24 @@ impl Workspace {
                 DismissibleToast::success(message)
             };
             toast_stack.add_ephemeral_toast(toast, ctx);
+        });
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn show_codex_rate_limit_reset_toast(
+        &self,
+        kind: CodexRateLimitWindowKind,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let limit_name = match kind {
+            CodexRateLimitWindowKind::Primary => "5 hour",
+            CodexRateLimitWindowKind::Secondary => "weekly",
+        };
+        self.toast_stack.update(ctx, |toast_stack, ctx| {
+            toast_stack.add_ephemeral_toast(
+                DismissibleToast::success(format!("Codex {limit_name} usage limit reset.")),
+                ctx,
+            );
         });
     }
 
@@ -5764,7 +5807,7 @@ impl Workspace {
     fn set_workspace_group_color(
         &mut self,
         index: usize,
-        color: AnsiColorIdentifier,
+        color: WorkspaceGroupColor,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some(group) = self.workspace_groups.get_mut(index) else {
@@ -6878,46 +6921,56 @@ impl Workspace {
         };
 
         let selected_color = group.color;
-        let terminal_colors = Appearance::as_ref(ctx).theme().terminal_colors().normal;
-        let mouse_states: Vec<MouseStateHandle> = (0..TAB_COLOR_OPTIONS.len())
+        const WORKSPACE_GROUP_COLOR_COLUMNS: usize = 10;
+
+        let mouse_states: Vec<MouseStateHandle> = (0..WorkspaceGroupColor::OPTIONS.len())
             .map(|_| MouseStateHandle::default())
             .collect();
         let item = MenuItemFields::new_with_custom_label(
             Arc::new(move |_is_selected, _is_hovered, appearance, _app| {
                 let theme = appearance.theme();
                 let ring_color: ColorU = theme.accent().into();
-                let mut row = Flex::row()
-                    .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_main_axis_size(MainAxisSize::Max);
+                let mut column =
+                    Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Start);
 
-                for (color, mouse_state) in TAB_COLOR_OPTIONS
-                    .iter()
-                    .copied()
-                    .zip(mouse_states.iter().cloned())
+                for (row_index, color_row) in WorkspaceGroupColor::OPTIONS
+                    .chunks(WORKSPACE_GROUP_COLOR_COLUMNS)
+                    .enumerate()
                 {
-                    let dot = render_color_dot(
-                        mouse_state,
-                        color.to_ansi_color(&terminal_colors).into(),
-                        selected_color == color,
-                        ring_color,
-                        false,
-                        theme.foreground(),
-                        color.to_string(),
-                        appearance,
-                    )
-                    .on_click(move |ctx, _, _| {
-                        ctx.dispatch_typed_action(WorkspaceAction::SetWorkspaceGroupColor {
-                            index,
-                            color,
+                    let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+                    for (column_index, color) in color_row.iter().copied().enumerate() {
+                        let mouse_state = mouse_states
+                            [row_index * WORKSPACE_GROUP_COLOR_COLUMNS + column_index]
+                            .clone();
+                        let dot = render_color_dot(
+                            mouse_state,
+                            color.to_color_u(),
+                            selected_color == color,
+                            ring_color,
+                            false,
+                            theme.foreground(),
+                            color.label().to_string(),
+                            appearance,
+                        )
+                        .on_click(move |ctx, _, _| {
+                            ctx.dispatch_typed_action(WorkspaceAction::SetWorkspaceGroupColor {
+                                index,
+                                color,
+                            });
+                            ctx.dispatch_typed_action(MenuAction::Close(true));
                         });
-                        ctx.dispatch_typed_action(MenuAction::Close(true));
-                    });
 
-                    row.add_child(dot.finish());
+                        row.add_child(Container::new(dot.finish()).with_padding_right(6.).finish());
+                    }
+
+                    let mut row_container = Container::new(row.finish());
+                    if row_index == 0 {
+                        row_container = row_container.with_padding_bottom(6.);
+                    }
+                    column.add_child(row_container.finish());
                 }
 
-                row.finish()
+                column.finish()
             }),
             Some("Workspace color".to_string()),
         )

@@ -3,22 +3,26 @@ use crate::appearance::Appearance;
 use crate::system::{ResourceUsageSample, SystemInfo};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::terminal::cli_agent_sessions::codex_rate_limits::{
-    estimate_codex_rate_limit_projection, CodexRateLimitProjection, CodexRateLimitUsage,
-    CodexRateLimitUsageModel, CodexRateLimitWindowKind, CodexRateLimitWindowUsage,
+    estimate_codex_rate_limit_projection, estimate_codex_rate_limit_window_projection,
+    CodexRateLimitProjection, CodexRateLimitUsage, CodexRateLimitUsageModel,
+    CodexRateLimitWindowKind, CodexRateLimitWindowUsage,
 };
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::workspace::tab_settings::TabSettings;
 use crate::workspace::{Workspace, WorkspaceAction};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use chrono::{DateTime, Local, Utc};
+use pathfinder_geometry::vector::vec2f;
+use ui_components::tooltip::{Params as TooltipParams, Tooltip as TooltipComponent};
+use ui_components::{Component as _, Options as ComponentOptions};
 use warp_core::ui::color::coloru_with_opacity;
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::Icon;
 use warpui::elements::{
-    Border, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+    Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
     DispatchEventResult, DragAxis, Draggable, Element, EventHandler, Expanded, Fill, Flex,
-    Hoverable, MainAxisAlignment, MainAxisSize, Padding, ParentElement, Radius, Rect, SavePosition,
-    Shrinkable, Stack, Text,
+    Hoverable, MainAxisAlignment, MainAxisSize, OffsetPositioning, Padding, ParentAnchor,
+    ParentElement, ParentOffsetBounds, Radius, Rect, SavePosition, Shrinkable, Stack, Text,
 };
 use warpui::platform::Cursor;
 use warpui::{color::ColorU, AppContext, SingletonEntity};
@@ -31,6 +35,7 @@ const COLOR_LABEL_GAP_WIDTH: f32 = 10.;
 const WORKSPACE_COLOR_INDICATOR_SIZE: f32 = 14.;
 const WORKSPACE_COLOR_DOT_SIZE: f32 = 6.;
 const COUNT_SLOT_WIDTH: f32 = 24.;
+const NOTIFICATION_SLOT_WIDTH: f32 = 18.;
 const CLOSE_SLOT_WIDTH: f32 = 22.;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 const RESOURCE_GRAPH_BAR_COUNT: usize = 72;
@@ -126,6 +131,8 @@ impl Workspace {
                 group.tabs.len()
             };
             let has_unread_attention = self.workspace_group_has_unread_notifications(index, app);
+            let unread_notification_count =
+                self.workspace_group_unread_notification_count(index, app);
             let flash_attention =
                 has_unread_attention && self.workspace_group_notification_flash_on;
             let name = group.name.clone();
@@ -138,8 +145,7 @@ impl Workspace {
                     .with_main_axis_size(MainAxisSize::Max)
                     .with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-                let workspace_color: ColorU =
-                    color.to_ansi_color(&theme.terminal_colors().normal).into();
+                let workspace_color = color.to_color_u();
                 let color_dot = ConstrainedBox::new(
                     Icon::Ellipse
                         .to_warpui_icon(workspace_color.into())
@@ -211,6 +217,15 @@ impl Workspace {
                     ConstrainedBox::new(count_row.finish())
                         .with_width(COUNT_SLOT_WIDTH)
                         .finish(),
+                );
+                row.add_child(
+                    ConstrainedBox::new(Self::render_workspace_group_notification_indicator(
+                        unread_notification_count,
+                        state.is_hovered(),
+                        appearance,
+                    ))
+                    .with_width(NOTIFICATION_SLOT_WIDTH)
+                    .finish(),
                 );
 
                 let close_slot = EventHandler::new(
@@ -340,6 +355,56 @@ impl Workspace {
         .finish()
     }
 
+    fn render_workspace_group_notification_indicator(
+        unread_count: usize,
+        show_tooltip: bool,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        if unread_count == 0 {
+            return warpui::elements::Empty::new().finish();
+        }
+
+        let theme = appearance.theme();
+        let indicator = ConstrainedBox::new(Icon::Bell.to_warpui_icon(theme.accent()).finish())
+            .with_width(12.)
+            .with_height(12.)
+            .finish();
+
+        let indicator = Container::new(indicator)
+            .with_padding(Padding::uniform(2.))
+            .finish();
+
+        if !show_tooltip {
+            return indicator;
+        }
+
+        let notification_label = if unread_count == 1 {
+            "1 unread agent notification".to_string()
+        } else {
+            format!("{unread_count} unread agent notifications")
+        };
+        let tooltip = TooltipComponent.render(
+            appearance,
+            TooltipParams {
+                label: notification_label.into(),
+                options: ComponentOptions::default(appearance),
+            },
+        );
+
+        Stack::new()
+            .with_child(indicator)
+            .with_positioned_child(
+                tooltip,
+                OffsetPositioning::offset_from_parent(
+                    vec2f(0., -4.),
+                    ParentOffsetBounds::Unbounded,
+                    ParentAnchor::TopMiddle,
+                    ChildAnchor::BottomMiddle,
+                ),
+            )
+            .finish()
+    }
+
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn render_workspace_resource_stats(
         app: &AppContext,
@@ -412,16 +477,33 @@ impl Workspace {
     ) -> Box<dyn Element> {
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         let current = usage.current.as_ref();
+        let now = Utc::now();
 
         if let Some(primary) = current.and_then(|sample| sample.primary.as_ref()) {
-            column.add_child(Self::render_codex_rate_limit_card(primary, appearance));
+            column.add_child(Self::render_codex_rate_limit_card(
+                primary,
+                Self::codex_rate_limit_window_empty_label(
+                    usage,
+                    CodexRateLimitWindowKind::Primary,
+                    now,
+                ),
+                appearance,
+            ));
         }
 
         if let Some(secondary) = current.and_then(|sample| sample.secondary.as_ref()) {
-            column.add_child(Self::render_codex_rate_limit_card(secondary, appearance));
+            column.add_child(Self::render_codex_rate_limit_card(
+                secondary,
+                Self::codex_rate_limit_window_empty_label(
+                    usage,
+                    CodexRateLimitWindowKind::Secondary,
+                    now,
+                ),
+                appearance,
+            ));
         }
 
-        let status_label = Self::codex_rate_limit_status_label(usage, Utc::now());
+        let status_label = Self::codex_rate_limit_status_label(usage, now);
         column.add_child(Self::render_codex_rate_limit_status(
             status_label,
             appearance,
@@ -435,6 +517,7 @@ impl Workspace {
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn render_codex_rate_limit_card(
         window: &CodexRateLimitWindowUsage,
+        empty_label: Option<String>,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
@@ -473,6 +556,21 @@ impl Workspace {
             .with_padding_top(6.)
             .finish(),
         );
+        if let Some(empty_label) = empty_label {
+            column.add_child(
+                Container::new(
+                    Text::new_inline(
+                        empty_label,
+                        appearance.ui_font_family(),
+                        RESOURCE_TIME_FONT_SIZE,
+                    )
+                    .with_color(reset_color)
+                    .finish(),
+                )
+                .with_padding_top(6.)
+                .finish(),
+            );
+        }
         column.add_child(
             Container::new(
                 Text::new_inline(
@@ -711,6 +809,24 @@ impl Workspace {
                 }
             }
             None => "Reset unavailable".to_string(),
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn codex_rate_limit_window_empty_label(
+        usage: &CodexRateLimitUsage,
+        kind: CodexRateLimitWindowKind,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
+        match estimate_codex_rate_limit_window_projection(usage, kind, now) {
+            CodexRateLimitProjection::EmptyNow => Some("Limit reached".to_string()),
+            CodexRateLimitProjection::EmptyAt(empty_at) => Some(format!(
+                "Empty in {}",
+                Self::format_codex_rate_limit_duration(empty_at - now)
+            )),
+            CodexRateLimitProjection::ResetsAt(_)
+            | CodexRateLimitProjection::Stable
+            | CodexRateLimitProjection::Unknown => None,
         }
     }
 
@@ -1064,6 +1180,78 @@ mod tests {
         assert_eq!(
             Workspace::codex_rate_limit_status_label(&usage, base + chrono::Duration::minutes(20),),
             "Empty in 10m"
+        );
+    }
+
+    #[test]
+    fn codex_rate_limit_window_empty_label_estimates_primary_window() {
+        let base = DateTime::UNIX_EPOCH;
+        let reset = base + chrono::Duration::hours(3);
+        let history = vec![
+            codex_usage_sample(base, Some(30.), Some(90.), Some(reset)),
+            codex_usage_sample(
+                base + chrono::Duration::minutes(10),
+                Some(20.),
+                Some(89.),
+                Some(reset),
+            ),
+            codex_usage_sample(
+                base + chrono::Duration::minutes(20),
+                Some(10.),
+                Some(88.),
+                Some(reset),
+            ),
+        ];
+        let usage = CodexRateLimitUsage {
+            current: history.last().cloned(),
+            history,
+            last_error: None,
+            is_stale: false,
+        };
+
+        assert_eq!(
+            Workspace::codex_rate_limit_window_empty_label(
+                &usage,
+                CodexRateLimitWindowKind::Primary,
+                base + chrono::Duration::minutes(20),
+            ),
+            Some("Empty in 10m".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_rate_limit_window_empty_label_estimates_secondary_window() {
+        let base = DateTime::UNIX_EPOCH;
+        let reset = base + chrono::Duration::hours(3);
+        let history = vec![
+            codex_usage_sample(base, Some(90.), Some(30.), Some(reset)),
+            codex_usage_sample(
+                base + chrono::Duration::minutes(10),
+                Some(89.),
+                Some(20.),
+                Some(reset),
+            ),
+            codex_usage_sample(
+                base + chrono::Duration::minutes(20),
+                Some(88.),
+                Some(10.),
+                Some(reset),
+            ),
+        ];
+        let usage = CodexRateLimitUsage {
+            current: history.last().cloned(),
+            history,
+            last_error: None,
+            is_stale: false,
+        };
+
+        assert_eq!(
+            Workspace::codex_rate_limit_window_empty_label(
+                &usage,
+                CodexRateLimitWindowKind::Secondary,
+                base + chrono::Duration::minutes(20),
+            ),
+            Some("Empty in 10m".to_string())
         );
     }
 

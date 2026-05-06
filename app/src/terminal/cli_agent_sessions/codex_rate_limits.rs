@@ -24,6 +24,7 @@ const RESET_REMAINING_INCREASE_THRESHOLD: f32 = 5.;
 
 pub enum CodexRateLimitUsageModelEvent {
     Refreshed,
+    LimitReset { kind: CodexRateLimitWindowKind },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,9 +131,17 @@ impl CodexRateLimitUsageModel {
             |me, result, ctx| {
                 let next_delay = match result {
                     Ok(sample) => {
+                        let reset_kinds = me
+                            .current
+                            .as_ref()
+                            .map(|previous| detect_codex_rate_limit_resets(previous, &sample))
+                            .unwrap_or_default();
                         me.history.push(sample.clone());
                         me.current = Some(sample);
                         me.last_error = None;
+                        for kind in reset_kinds {
+                            ctx.emit(CodexRateLimitUsageModelEvent::LimitReset { kind });
+                        }
                         REFRESH_INTERVAL
                     }
                     Err(error) => {
@@ -148,6 +157,47 @@ impl CodexRateLimitUsageModel {
                 Self::schedule_refresh(ctx, next_delay);
             },
         );
+    }
+}
+
+fn detect_codex_rate_limit_resets(
+    previous: &CodexRateLimitUsageSample,
+    current: &CodexRateLimitUsageSample,
+) -> Vec<CodexRateLimitWindowKind> {
+    [
+        CodexRateLimitWindowKind::Primary,
+        CodexRateLimitWindowKind::Secondary,
+    ]
+    .into_iter()
+    .filter(|kind| {
+        let Some(previous_window) = previous.window(*kind) else {
+            return false;
+        };
+        let Some(current_window) = current.window(*kind) else {
+            return false;
+        };
+
+        codex_rate_limit_window_reset_detected(previous_window, current_window, current.fetched_at)
+    })
+    .collect()
+}
+
+fn codex_rate_limit_window_reset_detected(
+    previous: &CodexRateLimitWindowUsage,
+    current: &CodexRateLimitWindowUsage,
+    fetched_at: DateTime<Utc>,
+) -> bool {
+    let remaining_increased =
+        current.remaining_percent - previous.remaining_percent > RESET_REMAINING_INCREASE_THRESHOLD;
+
+    match (previous.resets_at, current.resets_at) {
+        (Some(previous_resets_at), Some(current_resets_at))
+            if current_resets_at != previous_resets_at =>
+        {
+            fetched_at >= previous_resets_at || remaining_increased
+        }
+        (None, _) | (_, None) => remaining_increased,
+        _ => false,
     }
 }
 
@@ -184,41 +234,29 @@ pub fn estimate_codex_rate_limit_projection(
     usage: &CodexRateLimitUsage,
     now: DateTime<Utc>,
 ) -> CodexRateLimitProjection {
-    let Some(current) = usage.current.as_ref() else {
-        return if usage.last_error.is_some() {
-            CodexRateLimitProjection::Unknown
-        } else {
-            CodexRateLimitProjection::Stable
-        };
-    };
-
-    if current.rate_limit_reached_type.is_some()
-        || current
-            .primary
-            .as_ref()
-            .is_some_and(|window| window.remaining_percent <= 0.)
-        || current
-            .secondary
-            .as_ref()
-            .is_some_and(|window| window.remaining_percent <= 0.)
+    if usage
+        .current
+        .as_ref()
+        .is_some_and(|current| current.rate_limit_reached_type.is_some())
     {
         return CodexRateLimitProjection::EmptyNow;
     }
 
     let projections = [
-        estimate_window_projection(
-            &usage.history,
-            current,
-            CodexRateLimitWindowKind::Primary,
-            now,
-        ),
-        estimate_window_projection(
-            &usage.history,
-            current,
+        estimate_codex_rate_limit_window_projection(usage, CodexRateLimitWindowKind::Primary, now),
+        estimate_codex_rate_limit_window_projection(
+            usage,
             CodexRateLimitWindowKind::Secondary,
             now,
         ),
     ];
+
+    if projections
+        .iter()
+        .any(|projection| matches!(projection, CodexRateLimitProjection::EmptyNow))
+    {
+        return CodexRateLimitProjection::EmptyNow;
+    }
 
     if let Some(empty_at) = projections
         .iter()
@@ -250,6 +288,30 @@ pub fn estimate_codex_rate_limit_projection(
     } else {
         CodexRateLimitProjection::Unknown
     }
+}
+
+pub fn estimate_codex_rate_limit_window_projection(
+    usage: &CodexRateLimitUsage,
+    kind: CodexRateLimitWindowKind,
+    now: DateTime<Utc>,
+) -> CodexRateLimitProjection {
+    let Some(current) = usage.current.as_ref() else {
+        return if usage.last_error.is_some() {
+            CodexRateLimitProjection::Unknown
+        } else {
+            CodexRateLimitProjection::Stable
+        };
+    };
+
+    let Some(current_window) = current.window(kind) else {
+        return CodexRateLimitProjection::Unknown;
+    };
+
+    if current_window.remaining_percent <= 0. {
+        return CodexRateLimitProjection::EmptyNow;
+    }
+
+    estimate_window_projection(&usage.history, current, kind, now)
 }
 
 fn estimate_window_projection(
@@ -572,6 +634,35 @@ mod tests {
         }
     }
 
+    fn sample_with_windows(
+        fetched_at: DateTime<Utc>,
+        primary_remaining_percent: Option<f32>,
+        secondary_remaining_percent: Option<f32>,
+        resets_at: Option<DateTime<Utc>>,
+    ) -> CodexRateLimitUsageSample {
+        CodexRateLimitUsageSample {
+            fetched_at,
+            primary: primary_remaining_percent.map(|remaining_percent| CodexRateLimitWindowUsage {
+                kind: CodexRateLimitWindowKind::Primary,
+                used_percent: 100. - remaining_percent,
+                remaining_percent,
+                window_duration_mins: Some(300),
+                resets_at,
+            }),
+            secondary: secondary_remaining_percent.map(|remaining_percent| {
+                CodexRateLimitWindowUsage {
+                    kind: CodexRateLimitWindowKind::Secondary,
+                    used_percent: 100. - remaining_percent,
+                    remaining_percent,
+                    window_duration_mins: Some(10080),
+                    resets_at,
+                }
+            }),
+            plan_type: Some("pro".to_string()),
+            rate_limit_reached_type: None,
+        }
+    }
+
     #[test]
     fn parses_rate_limit_response() {
         let response = r#"{
@@ -689,5 +780,53 @@ mod tests {
             estimate_codex_rate_limit_projection(&usage, base + chrono::Duration::minutes(30)),
             CodexRateLimitProjection::ResetsAt(new_reset)
         );
+    }
+
+    #[test]
+    fn detects_primary_limit_reset_after_previous_reset_time() {
+        let base = DateTime::UNIX_EPOCH;
+        let old_reset = base + chrono::Duration::hours(5);
+        let new_reset = old_reset + chrono::Duration::hours(5);
+        let previous = sample(base, 99., Some(old_reset));
+        let current = sample(
+            old_reset + chrono::Duration::minutes(1),
+            100.,
+            Some(new_reset),
+        );
+
+        assert_eq!(
+            detect_codex_rate_limit_resets(&previous, &current),
+            vec![CodexRateLimitWindowKind::Primary]
+        );
+    }
+
+    #[test]
+    fn detects_weekly_limit_reset() {
+        let base = DateTime::UNIX_EPOCH;
+        let old_reset = base + chrono::Duration::weeks(1);
+        let new_reset = old_reset + chrono::Duration::weeks(1);
+        let previous = sample_with_windows(base, None, Some(92.), Some(old_reset));
+        let current = sample_with_windows(
+            old_reset + chrono::Duration::minutes(1),
+            None,
+            Some(100.),
+            Some(new_reset),
+        );
+
+        assert_eq!(
+            detect_codex_rate_limit_resets(&previous, &current),
+            vec![CodexRateLimitWindowKind::Secondary]
+        );
+    }
+
+    #[test]
+    fn ignores_reset_timestamp_change_before_reset_time_without_remaining_jump() {
+        let base = DateTime::UNIX_EPOCH;
+        let old_reset = base + chrono::Duration::hours(5);
+        let new_reset = old_reset + chrono::Duration::hours(5);
+        let previous = sample(base, 80., Some(old_reset));
+        let current = sample(base + chrono::Duration::minutes(1), 79., Some(new_reset));
+
+        assert!(detect_codex_rate_limit_resets(&previous, &current).is_empty());
     }
 }

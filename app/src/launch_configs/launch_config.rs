@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::app_state::{
     AppState, LeafContents, PaneNodeSnapshot, SplitDirection as StateSplitDirection, TabSnapshot,
-    WindowSnapshot, WorkspaceGroupSnapshot,
+    WindowSnapshot, WorkspaceGroupColor, WorkspaceGroupSnapshot,
 };
 use crate::themes::theme::AnsiColorIdentifier;
 use anyhow::{anyhow, Result};
@@ -94,7 +94,7 @@ impl From<WindowSnapshot> for WindowTemplate {
 pub struct WorkspaceGroupTemplate {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub color: Option<AnsiColorIdentifier>,
+    pub color: Option<WorkspaceGroupColor>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub active_tab_index: Option<usize>,
     #[serde(default)]

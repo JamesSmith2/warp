@@ -2702,14 +2702,14 @@ fn test_window_workspace_groups_set_color_updates_target_group() {
             workspace.handle_action(
                 &WorkspaceAction::SetWorkspaceGroupColor {
                     index: 0,
-                    color: AnsiColorIdentifier::Magenta,
+                    color: crate::app_state::WorkspaceGroupColor::Magenta,
                 },
                 ctx,
             );
 
             assert_eq!(
                 workspace.workspace_groups[0].color,
-                AnsiColorIdentifier::Magenta
+                crate::app_state::WorkspaceGroupColor::Magenta
             );
             assert_eq!(
                 workspace.workspace_groups[1].color,
@@ -2936,7 +2936,25 @@ fn test_window_workspace_groups_detects_unread_notifications_in_inactive_group()
             });
 
             assert!(workspace.workspace_group_has_unread_notifications(0, ctx));
+            assert_eq!(
+                workspace.workspace_group_unread_notification_count(0, ctx),
+                1
+            );
             assert!(!workspace.workspace_group_has_unread_notifications(1, ctx));
+            assert_eq!(
+                workspace.workspace_group_unread_notification_count(1, ctx),
+                0
+            );
+
+            AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.mark_all_items_read(ctx);
+            });
+
+            assert!(!workspace.workspace_group_has_unread_notifications(0, ctx));
+            assert_eq!(
+                workspace.workspace_group_unread_notification_count(0, ctx),
+                0
+            );
         });
     });
 }
@@ -2986,7 +3004,7 @@ fn test_window_workspace_groups_restore_inactive_group_tabs_and_active_tab() {
                 vec![
                     crate::app_state::WorkspaceGroupSnapshot {
                         name: "Backend".to_string(),
-                        color: AnsiColorIdentifier::Green,
+                        color: crate::app_state::WorkspaceGroupColor::Green,
                         tabs: vec![
                             restored_workspace_group_test_tab("API"),
                             restored_workspace_group_test_tab("Worker"),
@@ -2995,7 +3013,7 @@ fn test_window_workspace_groups_restore_inactive_group_tabs_and_active_tab() {
                     },
                     crate::app_state::WorkspaceGroupSnapshot {
                         name: "Ops".to_string(),
-                        color: AnsiColorIdentifier::Magenta,
+                        color: crate::app_state::WorkspaceGroupColor::Magenta,
                         tabs: vec![restored_workspace_group_test_tab("Deploy")],
                         active_tab_index: 0,
                     },
@@ -3049,13 +3067,13 @@ fn test_window_workspace_groups_restore_empty_groups_with_default_session() {
                 vec![
                     crate::app_state::WorkspaceGroupSnapshot {
                         name: "Empty".to_string(),
-                        color: AnsiColorIdentifier::Blue,
+                        color: crate::app_state::WorkspaceGroupColor::Blue,
                         tabs: vec![],
                         active_tab_index: 0,
                     },
                     crate::app_state::WorkspaceGroupSnapshot {
                         name: "Saved".to_string(),
-                        color: AnsiColorIdentifier::Cyan,
+                        color: crate::app_state::WorkspaceGroupColor::Cyan,
                         tabs: vec![restored_workspace_group_test_tab("Saved tab")],
                         active_tab_index: 0,
                     },
@@ -3100,7 +3118,7 @@ fn test_window_workspace_groups_open_launch_config_restores_imported_groups() {
             workspace_groups: vec![
                 crate::launch_configs::launch_config::WorkspaceGroupTemplate {
                     name: "Backend".to_string(),
-                    color: Some(AnsiColorIdentifier::Green),
+                    color: Some(crate::app_state::WorkspaceGroupColor::Green),
                     active_tab_index: Some(1),
                     tabs: vec![
                         launch_config_workspace_tab("API", "/repo/api"),
@@ -3109,7 +3127,7 @@ fn test_window_workspace_groups_open_launch_config_restores_imported_groups() {
                 },
                 crate::launch_configs::launch_config::WorkspaceGroupTemplate {
                     name: "Ops".to_string(),
-                    color: Some(AnsiColorIdentifier::Magenta),
+                    color: Some(crate::app_state::WorkspaceGroupColor::Magenta),
                     active_tab_index: Some(0),
                     tabs: vec![launch_config_workspace_tab("Deploy", "/repo/deploy")],
                 },
@@ -3132,11 +3150,11 @@ fn test_window_workspace_groups_open_launch_config_restores_imported_groups() {
             assert_eq!(workspace.active_workspace_group_index(), 1);
             assert_eq!(
                 workspace.workspace_groups[0].color,
-                AnsiColorIdentifier::Green
+                crate::app_state::WorkspaceGroupColor::Green
             );
             assert_eq!(
                 workspace.workspace_groups[1].color,
-                AnsiColorIdentifier::Magenta
+                crate::app_state::WorkspaceGroupColor::Magenta
             );
             assert_eq!(workspace.tab_count(), 1);
             assert_eq!(
@@ -3194,7 +3212,7 @@ fn test_window_workspace_groups_imports_active_yaml_window_into_current_window()
                     workspace_groups: vec![
                         crate::launch_configs::launch_config::WorkspaceGroupTemplate {
                             name: "Backend".to_string(),
-                            color: Some(AnsiColorIdentifier::Green),
+                            color: Some(crate::app_state::WorkspaceGroupColor::Green),
                             active_tab_index: Some(1),
                             tabs: vec![
                                 launch_config_workspace_tab("API", "/repo/api"),
@@ -3203,7 +3221,7 @@ fn test_window_workspace_groups_imports_active_yaml_window_into_current_window()
                         },
                         crate::launch_configs::launch_config::WorkspaceGroupTemplate {
                             name: "Ops".to_string(),
-                            color: Some(AnsiColorIdentifier::Magenta),
+                            color: Some(crate::app_state::WorkspaceGroupColor::Magenta),
                             active_tab_index: Some(0),
                             tabs: vec![launch_config_workspace_tab("Deploy", "/repo/deploy")],
                         },
@@ -3237,11 +3255,11 @@ fn test_window_workspace_groups_imports_active_yaml_window_into_current_window()
             );
             assert_eq!(
                 workspace.workspace_groups[workspace_group_count_before].color,
-                AnsiColorIdentifier::Green
+                crate::app_state::WorkspaceGroupColor::Green
             );
             assert_eq!(
                 workspace.workspace_groups[workspace_group_count_before + 1].color,
-                AnsiColorIdentifier::Magenta
+                crate::app_state::WorkspaceGroupColor::Magenta
             );
             assert_eq!(workspace.tab_count(), 1);
             assert_eq!(

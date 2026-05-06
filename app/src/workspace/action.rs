@@ -9,6 +9,7 @@ use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
+use crate::app_state::WorkspaceGroupColor;
 use crate::auth::auth_manager::LoginGatedFeature;
 use crate::drive::items::WarpDriveItemId;
 use crate::drive::CloudObjectTypeAndId;
@@ -111,7 +112,7 @@ pub enum WorkspaceAction {
     },
     SetWorkspaceGroupColor {
         index: usize,
-        color: AnsiColorIdentifier,
+        color: WorkspaceGroupColor,
     },
     ToggleWorkspaceGroupContextMenu {
         index: usize,

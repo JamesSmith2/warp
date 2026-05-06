@@ -212,6 +212,13 @@ impl NotificationItems {
             .iter()
             .any(|item| item.terminal_view_id == terminal_view_id && !item.is_read)
     }
+
+    pub(crate) fn unread_count_for_terminal_view(&self, terminal_view_id: EntityId) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.terminal_view_id == terminal_view_id && !item.is_read)
+            .count()
+    }
 }
 
 #[cfg(test)]

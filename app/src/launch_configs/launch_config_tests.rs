@@ -4,11 +4,10 @@ use crate::{
     app_state::{
         AppState, BranchSnapshot, LeafContents, LeafSnapshot, NotebookPaneSnapshot, PaneFlex,
         PaneNodeSnapshot, SplitDirection, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
-        WorkspaceGroupSnapshot,
+        WorkspaceGroupColor, WorkspaceGroupSnapshot,
     },
     drive::OpenWarpDriveObjectSettings,
     tab::SelectedTabColor,
-    themes::theme::AnsiColorIdentifier,
 };
 
 use super::{LaunchConfig, PaneMode, PaneTemplateType};
@@ -437,13 +436,13 @@ fn test_config_from_snapshot_preserves_workspace_groups() {
             workspace_groups: vec![
                 WorkspaceGroupSnapshot {
                     name: "Backend".to_string(),
-                    color: AnsiColorIdentifier::Green,
+                    color: WorkspaceGroupColor::Green,
                     tabs: backend_tabs,
                     active_tab_index: 1,
                 },
                 WorkspaceGroupSnapshot {
                     name: "Ops".to_string(),
-                    color: AnsiColorIdentifier::Magenta,
+                    color: WorkspaceGroupColor::Magenta,
                     tabs: ops_tabs,
                     active_tab_index: 0,
                 },
@@ -474,14 +473,14 @@ fn test_config_from_snapshot_preserves_workspace_groups() {
     assert_eq!(window.workspace_groups[0].name, "Backend");
     assert_eq!(
         window.workspace_groups[0].color,
-        Some(AnsiColorIdentifier::Green)
+        Some(WorkspaceGroupColor::Green)
     );
     assert_eq!(window.workspace_groups[0].active_tab_index, Some(1));
     assert_eq!(window.workspace_groups[0].tabs.len(), 2);
     assert_eq!(window.workspace_groups[1].name, "Ops");
     assert_eq!(
         window.workspace_groups[1].color,
-        Some(AnsiColorIdentifier::Magenta)
+        Some(WorkspaceGroupColor::Magenta)
     );
     assert_eq!(window.tabs.len(), 1);
     assert_eq!(window.tabs[0].title.as_deref(), Some("Deploy"));
