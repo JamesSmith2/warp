@@ -18,6 +18,11 @@
   <a href="https://www.warp.dev/blog/how-warp-works">How Warp Works</a>
 </p>
 
+### Warp in Power mode for Multi-project Workspaces
+
+<img width="1187" height="792" alt="image" src="https://github.com/user-attachments/assets/d73054c0-7ee4-403b-a17e-7dd9af88c129" />
+
+
 > [!NOTE]
 > OpenAI is the founding sponsor of the new, open-source Warp repository, and the new agentic management workflows are powered by GPT models.
 
