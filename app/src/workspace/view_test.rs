@@ -74,7 +74,13 @@ use crate::ai::mcp::{
     FileBasedMCPManager, FileMCPWatcher,
 };
 use crate::resource_center::Tip;
-use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
+use crate::terminal::cli_agent_sessions::event::{
+    CLIAgentEvent, CLIAgentEventPayload, CLIAgentEventType,
+};
+use crate::terminal::cli_agent_sessions::{
+    CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionStatus,
+    CLIAgentSessionsModel,
+};
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseSettings;
 use crate::warp_managed_paths_watcher::WarpManagedPathsWatcher;
@@ -83,6 +89,7 @@ use crate::{experiments, workspace, GlobalResourceHandlesProvider};
 use crate::{AgentNotificationsModel, ObjectActions};
 
 use crate::settings::cloud_preferences_syncer::CloudPreferencesSyncer;
+use crate::terminal::model::ansi::{BootstrappedValue, Handler, InitShellValue};
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
 use ai::project_context::model::ProjectContextModel;
 use pane_group::{NotebookPane, PaneState, SplitPaneState, TerminalPaneId};
@@ -2955,6 +2962,153 @@ fn test_window_workspace_groups_detects_unread_notifications_in_inactive_group()
                 workspace.workspace_group_unread_notification_count(0, ctx),
                 0
             );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_detects_running_activity_in_inactive_group() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert!(!workspace.has_workspace_group_running_terminal_activity(ctx));
+
+            let inactive_terminal_view = workspace.workspace_groups[0].tabs[0]
+                .pane_group
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .expect("inactive group should have a focused terminal");
+
+            {
+                let terminal_view = inactive_terminal_view.as_ref(ctx);
+                let mut model = terminal_view.model.lock();
+                model.init_shell(InitShellValue {
+                    session_id: 0.into(),
+                    shell: "zsh".to_owned(),
+                    ..Default::default()
+                });
+                model.bootstrapped(BootstrappedValue {
+                    shell: "zsh".to_owned(),
+                    ..Default::default()
+                });
+                model.simulate_long_running_block("codex", "running");
+            }
+
+            assert!(
+                !workspace.workspace_group_has_running_terminal_activity(0, ctx),
+                "a long-running CLI process alone should not animate as agent work"
+            );
+            assert!(!workspace.has_workspace_group_running_terminal_activity(ctx));
+
+            let inactive_terminal_view_id = inactive_terminal_view.id();
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.set_session(
+                    inactive_terminal_view_id,
+                    CLIAgentSession {
+                        agent: CLIAgent::Codex,
+                        status: CLIAgentSessionStatus::InProgress,
+                        session_context: CLIAgentSessionContext::default(),
+                        input_state: CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        plugin_version: None,
+                        remote_host: None,
+                        draft_text: None,
+                        custom_command_prefix: None,
+                    },
+                    ctx,
+                );
+            });
+
+            assert!(
+                workspace.workspace_group_has_running_terminal_activity(0, ctx),
+                "a detected non-rich CLI agent session should animate while its terminal command is still running"
+            );
+            assert!(!workspace.workspace_group_has_running_terminal_activity(1, ctx));
+            assert!(workspace.has_workspace_group_running_terminal_activity(ctx));
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.update_from_event(
+                    inactive_terminal_view_id,
+                    &CLIAgentEvent {
+                        v: 1,
+                        agent: CLIAgent::Codex,
+                        event: CLIAgentEventType::Stop,
+                        session_id: None,
+                        cwd: None,
+                        project: None,
+                        payload: CLIAgentEventPayload {
+                            query: Some("Agent turn complete".to_string()),
+                            ..Default::default()
+                        },
+                    },
+                    ctx,
+                );
+            });
+
+            assert!(
+                !workspace.workspace_group_has_running_terminal_activity(0, ctx),
+                "a non-rich Codex stop notification should clear activity even while the Codex TUI remains open"
+            );
+            assert!(!workspace.has_workspace_group_running_terminal_activity(ctx));
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.update_from_event(
+                    inactive_terminal_view_id,
+                    &CLIAgentEvent {
+                        v: 1,
+                        agent: CLIAgent::Codex,
+                        event: CLIAgentEventType::PermissionRequest,
+                        session_id: None,
+                        cwd: None,
+                        project: None,
+                        payload: CLIAgentEventPayload {
+                            summary: Some("Approval needed".to_string()),
+                            ..Default::default()
+                        },
+                    },
+                    ctx,
+                );
+            });
+
+            assert!(
+                !workspace.workspace_group_has_running_terminal_activity(0, ctx),
+                "opaque non-rich CLI-agent blocked events should not infer workspace activity without rich status"
+            );
+            assert!(!workspace.has_workspace_group_running_terminal_activity(ctx));
+
+            {
+                let terminal_view = inactive_terminal_view.as_ref(ctx);
+                let mut model = terminal_view.model.lock();
+                model.finish_block();
+            }
+
+            assert!(!workspace.workspace_group_has_running_terminal_activity(0, ctx));
+            assert!(!workspace.has_workspace_group_running_terminal_activity(ctx));
+
+            {
+                let terminal_view = inactive_terminal_view.as_ref(ctx);
+                let mut model = terminal_view.model.lock();
+                model.simulate_long_running_block("sleep 10", "still running");
+            }
+
+            assert!(
+                !workspace.workspace_group_has_running_terminal_activity(0, ctx),
+                "a stale Codex session should not animate a non-Codex long-running command"
+            );
+            assert!(!workspace.has_workspace_group_running_terminal_activity(ctx));
         });
     });
 }

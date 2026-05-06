@@ -77,6 +77,10 @@ while (( "$#" )); do
       fi
       PARAMS="$PARAMS --profile $PROFILE"
       ;;
+    --no-default-features)
+      PARAMS="$PARAMS $1"
+      shift
+      ;;
     --open_with_launchd)
       OPEN_WITH_LAUNCHD=true
       shift

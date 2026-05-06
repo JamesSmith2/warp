@@ -442,6 +442,14 @@ impl ActiveAgentViewsModel {
             .find_map(|(view_id, id)| (*id == task_id).then_some(*view_id))
     }
 
+    /// Returns the active ambient task for a terminal view, when that terminal hosts one.
+    pub fn ambient_task_id_for_terminal_view(
+        &self,
+        terminal_view_id: EntityId,
+    ) -> Option<AmbientAgentTaskId> {
+        self.ambient_sessions.get(&terminal_view_id).copied()
+    }
+
     /// Returns the terminal view ID that has an active conversation with the given ID.
     pub fn get_terminal_view_id_for_conversation(
         &self,

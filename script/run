@@ -19,6 +19,13 @@ cd "${REPO_ROOT}"
 OS_TYPE="$(uname -s)"
 
 FEATURES="gui"
+NO_DEFAULT_FEATURES=false
+
+add_feature() {
+    if [[ ! ",$FEATURES," =~ ,"$1", ]]; then
+        FEATURES="$FEATURES,$1"
+    fi
+}
 
 ./script/install_channel_config || echo "Skipping internal channel config installation (no repo access)."
 
@@ -47,12 +54,29 @@ while (( "$#" )); do
       ;;
     --features)
       if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
-        FEATURES="$FEATURES,$2"
+        add_feature "$2"
         shift 2
       else
         echo "Error: Argument for $1 is missing" >&2
         exit 1
       fi
+      ;;
+    --fast-build)
+      if [ "$NO_DEFAULT_FEATURES" = false ]; then
+        CARGO_PARAMS+=("--no-default-features")
+        MAC_ARGS+=("--no-default-features")
+      fi
+      NO_DEFAULT_FEATURES=true
+      add_feature "fast_dev"
+      shift
+      ;;
+    --no-default-features)
+      if [ "$NO_DEFAULT_FEATURES" = false ]; then
+        CARGO_PARAMS+=("$1")
+        MAC_ARGS+=("$1")
+      fi
+      NO_DEFAULT_FEATURES=true
+      shift
       ;;
     --host-id)
       if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then

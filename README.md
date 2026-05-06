@@ -101,6 +101,7 @@ To build and run Warp from source:
 ```bash
 ./script/bootstrap   # platform-specific setup
 ./script/run         # build and run Warp
+./script/run --fast-build  # local fast build with default feature flags disabled
 ./script/presubmit   # fmt, clippy, and tests
 ```
 

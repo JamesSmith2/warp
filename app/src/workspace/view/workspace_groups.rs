@@ -1,3 +1,10 @@
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::ai::active_agent_views_model::{ActiveAgentViewsModel, ConversationOrTaskId};
+use crate::ai::agent::conversation::ConversationStatus;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::ai::agent_conversations_model::AgentConversationsModel;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::ai::ambient_agents::{AmbientAgentTaskId, AmbientAgentTaskState};
 use crate::appearance::Appearance;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::system::{ResourceUsageSample, SystemInfo};
@@ -7,9 +14,13 @@ use crate::terminal::cli_agent_sessions::codex_rate_limits::{
     CodexRateLimitProjection, CodexRateLimitUsage, CodexRateLimitUsageModel,
     CodexRateLimitWindowKind, CodexRateLimitWindowUsage,
 };
+use crate::terminal::cli_agent_sessions::listener::agent_supports_rich_status;
+use crate::terminal::cli_agent_sessions::{CLIAgentSessionStatus, CLIAgentSessionsModel};
+use crate::terminal::{CLIAgent, TerminalView};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::workspace::tab_settings::TabSettings;
 use crate::workspace::{Workspace, WorkspaceAction};
+use crate::BlocklistAIHistoryModel;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use chrono::{DateTime, Local, Utc};
 use pathfinder_geometry::vector::vec2f;
@@ -25,6 +36,8 @@ use warpui::elements::{
     ParentElement, ParentOffsetBounds, Radius, Rect, SavePosition, Shrinkable, Stack, Text,
 };
 use warpui::platform::Cursor;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use warpui::EntityId;
 use warpui::{color::ColorU, AppContext, SingletonEntity};
 
 const PANEL_WIDTH: f32 = 220.;
@@ -34,6 +47,19 @@ const COLOR_SLOT_WIDTH: f32 = 16.;
 const COLOR_LABEL_GAP_WIDTH: f32 = 10.;
 const WORKSPACE_COLOR_INDICATOR_SIZE: f32 = 14.;
 const WORKSPACE_COLOR_DOT_SIZE: f32 = 6.;
+const WORKSPACE_ACTIVITY_ICON_SIZE: f32 = 14.;
+const WORKSPACE_ACTIVITY_ICON_LEFT_PADDING: f32 = 6.;
+pub(super) const WORKSPACE_ACTIVITY_ANIMATION_FRAME_COUNT: usize = 8;
+const WORKSPACE_ACTIVITY_ANIMATION_FRAMES: [Icon; WORKSPACE_ACTIVITY_ANIMATION_FRAME_COUNT] = [
+    Icon::LoadingAgents0,
+    Icon::LoadingAgents1,
+    Icon::LoadingAgents2,
+    Icon::LoadingAgents3,
+    Icon::LoadingAgents4,
+    Icon::LoadingAgents5,
+    Icon::LoadingAgents6,
+    Icon::LoadingAgents7,
+];
 const COUNT_SLOT_WIDTH: f32 = 24.;
 const NOTIFICATION_SLOT_WIDTH: f32 = 18.;
 const CLOSE_SLOT_WIDTH: f32 = 22.;
@@ -62,6 +88,19 @@ struct WorkspaceResourceStats {
     memory_footprint_bytes: u64,
     memory_usage: Option<f32>,
     history: Vec<ResourceUsageSample>,
+}
+
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct AgentSummaryStats {
+    pub(super) working: usize,
+    pub(super) waiting: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentActivity {
+    Working,
+    Waiting,
 }
 
 impl Workspace {
@@ -135,6 +174,9 @@ impl Workspace {
                 self.workspace_group_unread_notification_count(index, app);
             let flash_attention =
                 has_unread_attention && self.workspace_group_notification_flash_on;
+            let has_running_activity =
+                self.workspace_group_has_running_terminal_activity(index, app);
+            let activity_animation_frame = self.workspace_group_activity_animation_frame;
             let name = group.name.clone();
             let color = group.color;
             let row_mouse_state = group.mouse_state.clone();
@@ -200,6 +242,16 @@ impl Workspace {
                         )
                         .finish(),
                     );
+                    if has_running_activity {
+                        label_row.add_child(
+                            Container::new(Self::render_workspace_group_activity_indicator(
+                                activity_animation_frame,
+                                appearance,
+                            ))
+                            .with_padding_left(WORKSPACE_ACTIVITY_ICON_LEFT_PADDING)
+                            .finish(),
+                        );
+                    }
                 }
 
                 row.add_child(Expanded::new(1., label_row.finish()).finish());
@@ -318,7 +370,7 @@ impl Workspace {
 
         #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
         if Self::show_workspace_resource_monitor(app) {
-            column.add_child(Self::render_workspace_resource_stats(app, appearance));
+            column.add_child(self.render_workspace_resource_stats(app, appearance));
         }
 
         let add_row = EventHandler::new(
@@ -352,6 +404,49 @@ impl Workspace {
                 .finish(),
         )
         .with_width(PANEL_WIDTH)
+        .finish()
+    }
+
+    pub(super) fn workspace_group_has_running_terminal_activity(
+        &self,
+        index: usize,
+        app: &AppContext,
+    ) -> bool {
+        let Some(tabs) = self.tabs_for_workspace_group(index) else {
+            return false;
+        };
+
+        tabs.iter().any(|tab| {
+            tab.pane_group
+                .as_ref(app)
+                .terminal_views(app)
+                .iter()
+                .any(|terminal_view| {
+                    Self::terminal_agent_activity(terminal_view.as_ref(app), app)
+                        .is_some_and(|activity| matches!(activity, AgentActivity::Working))
+                })
+        })
+    }
+
+    pub(super) fn has_workspace_group_running_terminal_activity(&self, app: &AppContext) -> bool {
+        (0..self.workspace_groups.len())
+            .any(|index| self.workspace_group_has_running_terminal_activity(index, app))
+    }
+
+    fn render_workspace_group_activity_indicator(
+        frame_index: usize,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let icon = WORKSPACE_ACTIVITY_ANIMATION_FRAMES
+            [frame_index % WORKSPACE_ACTIVITY_ANIMATION_FRAMES.len()];
+
+        ConstrainedBox::new(
+            icon.to_warpui_icon(theme.sub_text_color(theme.background()))
+                .finish(),
+        )
+        .with_width(WORKSPACE_ACTIVITY_ICON_SIZE)
+        .with_height(WORKSPACE_ACTIVITY_ICON_SIZE)
         .finish()
     }
 
@@ -407,6 +502,7 @@ impl Workspace {
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn render_workspace_resource_stats(
+        &self,
         app: &AppContext,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -415,6 +511,10 @@ impl Workspace {
         let codex_usage = CodexRateLimitUsageModel::as_ref(app).usage();
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
+        column.add_child(Self::render_workspace_agent_summary_stats(
+            self.workspace_agent_summary_stats(app),
+            appearance,
+        ));
         column.add_child(Self::render_codex_rate_limit_stats(
             &codex_usage,
             appearance,
@@ -468,6 +568,88 @@ impl Workspace {
             .with_padding_top(6.)
             .with_padding_bottom(6.)
             .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_workspace_agent_summary_stats(
+        stats: AgentSummaryStats,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        column.add_child(Self::render_agent_summary_title(appearance));
+        column.add_child(Self::render_agent_summary_row(
+            "Working",
+            stats.working,
+            appearance,
+        ));
+        column.add_child(Self::render_agent_summary_row(
+            "Waiting",
+            stats.waiting,
+            appearance,
+        ));
+
+        Container::new(column.finish())
+            .with_padding_bottom(8.)
+            .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_agent_summary_title(appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+
+        Container::new(
+            Text::new_inline(
+                "Agents",
+                appearance.ui_font_family(),
+                RESOURCE_METRIC_FONT_SIZE,
+            )
+            .with_color(theme.sub_text_color(theme.background()).into())
+            .finish(),
+        )
+        .with_padding_bottom(4.)
+        .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_agent_summary_row(
+        label: impl Into<String>,
+        count: usize,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let text_color = theme.sub_text_color(theme.background()).into();
+        let value_color = theme.main_text_color(theme.background()).into();
+        let mut row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center);
+
+        row.add_child(
+            Text::new_inline(
+                label.into(),
+                appearance.ui_font_family(),
+                RESOURCE_METRIC_FONT_SIZE,
+            )
+            .with_color(text_color)
+            .finish(),
+        );
+        row.add_child(Expanded::new(1., warpui::elements::Empty::new().finish()).finish());
+        row.add_child(
+            Text::new_inline(
+                count.to_string(),
+                appearance.ui_font_family(),
+                RESOURCE_METRIC_FONT_SIZE,
+            )
+            .with_color(value_color)
+            .finish(),
+        );
+
+        Container::new(
+            ConstrainedBox::new(row.finish())
+                .with_width(RESOURCE_MONITOR_CONTENT_WIDTH)
+                .finish(),
+        )
+        .with_padding_bottom(2.)
+        .finish()
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
@@ -893,6 +1075,207 @@ impl Workspace {
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    pub(super) fn workspace_agent_summary_stats(&self, app: &AppContext) -> AgentSummaryStats {
+        let cli_sessions = CLIAgentSessionsModel::as_ref(app);
+        let active_views = ActiveAgentViewsModel::as_ref(app);
+        let open_agent_ids = active_views.get_all_open_conversation_ids(app);
+        let agent_conversations = AgentConversationsModel::as_ref(app);
+        let history_model = BlocklistAIHistoryModel::as_ref(app);
+
+        Self::workspace_agent_summary_stats_from_sources(
+            cli_sessions
+                .sessions_iter()
+                .map(|(terminal_view_id, session)| {
+                    (
+                        terminal_view_id,
+                        &session.status,
+                        session.listener.is_some() && agent_supports_rich_status(&session.agent),
+                        self.workspace_terminal_view_is_running_cli_agent(
+                            terminal_view_id,
+                            session.agent,
+                            app,
+                        ),
+                    )
+                }),
+            |terminal_view_id| active_views.ambient_task_id_for_terminal_view(terminal_view_id),
+            agent_conversations
+                .tasks_iter()
+                .map(|task| (task.task_id, &task.state)),
+            open_agent_ids.iter().filter_map(|id| match id {
+                ConversationOrTaskId::ConversationId(conversation_id) => history_model
+                    .conversation(conversation_id)
+                    .map(|conversation| conversation.status()),
+                ConversationOrTaskId::TaskId(_) => None,
+            }),
+        )
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn workspace_agent_summary_stats_from_sources<'a>(
+        cli_session_statuses: impl Iterator<Item = (EntityId, &'a CLIAgentSessionStatus, bool, bool)>,
+        terminal_ambient_task_id: impl Fn(EntityId) -> Option<AmbientAgentTaskId>,
+        task_statuses: impl Iterator<Item = (AmbientAgentTaskId, &'a AmbientAgentTaskState)>,
+        open_conversation_statuses: impl Iterator<Item = &'a ConversationStatus>,
+    ) -> AgentSummaryStats {
+        let mut stats = AgentSummaryStats::default();
+
+        for (terminal_view_id, status, has_rich_status, terminal_is_running_cli_agent) in
+            cli_session_statuses
+        {
+            if terminal_ambient_task_id(terminal_view_id).is_some() {
+                continue;
+            }
+            Self::record_agent_activity(
+                &mut stats,
+                Self::cli_agent_session_activity(
+                    status,
+                    has_rich_status,
+                    terminal_is_running_cli_agent,
+                ),
+            );
+        }
+
+        for (_, state) in task_statuses {
+            Self::record_ambient_agent_task_state(&mut stats, state);
+        }
+
+        for status in open_conversation_statuses {
+            Self::record_open_conversation_status(&mut stats, status);
+        }
+
+        stats
+    }
+
+    fn terminal_agent_activity(
+        terminal_view: &TerminalView,
+        app: &AppContext,
+    ) -> Option<AgentActivity> {
+        if let Some(session) = CLIAgentSessionsModel::as_ref(app).session(terminal_view.id()) {
+            let terminal_is_running_cli_agent = terminal_view
+                .detected_cli_agent_for_active_long_running_command(app)
+                .is_some_and(|agent| agent == session.agent);
+            if let Some(activity) = Self::cli_agent_session_activity(
+                &session.status,
+                session.listener.is_some() && agent_supports_rich_status(&session.agent),
+                terminal_is_running_cli_agent,
+            ) {
+                return Some(activity);
+            }
+        }
+
+        if let Some(conversation) =
+            BlocklistAIHistoryModel::as_ref(app).active_conversation(terminal_view.id())
+        {
+            if terminal_view.is_long_running() {
+                return Some(AgentActivity::Working);
+            }
+
+            if !conversation.is_empty() && !conversation.is_entirely_passive() {
+                return Self::conversation_status_activity(conversation.status().clone());
+            }
+        }
+
+        terminal_view
+            .selected_conversation_status_for_display(app)
+            .and_then(Self::conversation_status_activity)
+    }
+
+    fn cli_agent_activity_from_status(status: &CLIAgentSessionStatus) -> Option<AgentActivity> {
+        match status {
+            CLIAgentSessionStatus::InProgress => Some(AgentActivity::Working),
+            CLIAgentSessionStatus::Blocked { .. } => Some(AgentActivity::Waiting),
+            CLIAgentSessionStatus::Success => None,
+        }
+    }
+
+    fn cli_agent_session_activity(
+        status: &CLIAgentSessionStatus,
+        has_rich_status: bool,
+        terminal_is_running_cli_agent: bool,
+    ) -> Option<AgentActivity> {
+        if has_rich_status {
+            return Self::cli_agent_activity_from_status(status);
+        }
+
+        (terminal_is_running_cli_agent && matches!(status, CLIAgentSessionStatus::InProgress))
+            .then_some(AgentActivity::Working)
+    }
+
+    fn workspace_terminal_view_is_running_cli_agent(
+        &self,
+        terminal_view_id: EntityId,
+        agent: CLIAgent,
+        app: &AppContext,
+    ) -> bool {
+        (0..self.workspace_groups.len()).any(|index| {
+            self.tabs_for_workspace_group(index).is_some_and(|tabs| {
+                tabs.iter().any(|tab| {
+                    tab.pane_group
+                        .as_ref(app)
+                        .terminal_views(app)
+                        .iter()
+                        .any(|terminal_view| {
+                            terminal_view.id() == terminal_view_id
+                                && terminal_view
+                                    .as_ref(app)
+                                    .detected_cli_agent_for_active_long_running_command(app)
+                                    .is_some_and(|detected| detected == agent)
+                        })
+                })
+            })
+        })
+    }
+
+    fn conversation_status_activity(status: ConversationStatus) -> Option<AgentActivity> {
+        match status {
+            ConversationStatus::InProgress => Some(AgentActivity::Working),
+            ConversationStatus::Blocked { .. } => Some(AgentActivity::Waiting),
+            ConversationStatus::Success
+            | ConversationStatus::Error
+            | ConversationStatus::Cancelled => None,
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn record_agent_activity(stats: &mut AgentSummaryStats, activity: Option<AgentActivity>) {
+        match activity {
+            Some(AgentActivity::Working) => stats.working += 1,
+            Some(AgentActivity::Waiting) => stats.waiting += 1,
+            None => {}
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn record_ambient_agent_task_state(
+        stats: &mut AgentSummaryStats,
+        state: &AmbientAgentTaskState,
+    ) {
+        match state {
+            AmbientAgentTaskState::Queued
+            | AmbientAgentTaskState::Pending
+            | AmbientAgentTaskState::Claimed
+            | AmbientAgentTaskState::InProgress => stats.working += 1,
+            AmbientAgentTaskState::Blocked => stats.waiting += 1,
+            AmbientAgentTaskState::Succeeded
+            | AmbientAgentTaskState::Failed
+            | AmbientAgentTaskState::Error
+            | AmbientAgentTaskState::Cancelled
+            | AmbientAgentTaskState::Unknown => {}
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn record_open_conversation_status(stats: &mut AgentSummaryStats, status: &ConversationStatus) {
+        match status {
+            ConversationStatus::InProgress => stats.working += 1,
+            ConversationStatus::Blocked { .. } => stats.waiting += 1,
+            ConversationStatus::Success
+            | ConversationStatus::Error
+            | ConversationStatus::Cancelled => {}
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn workspace_resource_stats(app: &AppContext) -> WorkspaceResourceStats {
         let system_info = SystemInfo::as_ref(app);
         let current = system_info.current_resource_usage_sample();
@@ -1008,6 +1391,294 @@ mod tests {
             plan_type: Some("pro".to_string()),
             rate_limit_reached_type: None,
         }
+    }
+
+    fn test_task_id(index: usize) -> AmbientAgentTaskId {
+        format!("550e8400-e29b-41d4-a716-{index:012}")
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_counts_cli_working_and_waiting_sessions() {
+        let working_terminal = EntityId::new();
+        let blocked_terminal = EntityId::new();
+        let success_terminal = EntityId::new();
+        let cli_sessions = [
+            (
+                working_terminal,
+                CLIAgentSessionStatus::InProgress,
+                true,
+                false,
+            ),
+            (
+                blocked_terminal,
+                CLIAgentSessionStatus::Blocked {
+                    message: Some("Approval needed".to_string()),
+                },
+                true,
+                false,
+            ),
+            (
+                success_terminal,
+                CLIAgentSessionStatus::Success,
+                true,
+                false,
+            ),
+        ];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            cli_sessions.iter().map(
+                |(terminal_view_id, status, has_rich_status, terminal_is_long_running)| {
+                    (
+                        *terminal_view_id,
+                        status,
+                        *has_rich_status,
+                        *terminal_is_long_running,
+                    )
+                },
+            ),
+            |_| None,
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 1);
+        assert_eq!(stats.waiting, 1);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_ignores_non_rich_in_progress_sessions() {
+        let terminal_view_id = EntityId::new();
+        let cli_sessions = [(
+            terminal_view_id,
+            CLIAgentSessionStatus::InProgress,
+            false,
+            false,
+        )];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            cli_sessions.iter().map(
+                |(terminal_view_id, status, has_rich_status, terminal_is_long_running)| {
+                    (
+                        *terminal_view_id,
+                        status,
+                        *has_rich_status,
+                        *terminal_is_long_running,
+                    )
+                },
+            ),
+            |_| None,
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 0);
+        assert_eq!(stats.waiting, 0);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_counts_non_rich_in_progress_sessions_only_while_terminal_runs()
+    {
+        let running_terminal = EntityId::new();
+        let success_but_still_running_terminal = EntityId::new();
+        let blocked_but_still_running_terminal = EntityId::new();
+        let stale_terminal = EntityId::new();
+        let cli_sessions = [
+            (
+                running_terminal,
+                CLIAgentSessionStatus::InProgress,
+                false,
+                true,
+            ),
+            (
+                success_but_still_running_terminal,
+                CLIAgentSessionStatus::Success,
+                false,
+                true,
+            ),
+            (
+                blocked_but_still_running_terminal,
+                CLIAgentSessionStatus::Blocked {
+                    message: Some("Approval needed".to_string()),
+                },
+                false,
+                true,
+            ),
+            (
+                stale_terminal,
+                CLIAgentSessionStatus::InProgress,
+                false,
+                false,
+            ),
+        ];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            cli_sessions.iter().map(
+                |(terminal_view_id, status, has_rich_status, terminal_is_long_running)| {
+                    (
+                        *terminal_view_id,
+                        status,
+                        *has_rich_status,
+                        *terminal_is_long_running,
+                    )
+                },
+            ),
+            |_| None,
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 1);
+        assert_eq!(stats.waiting, 0);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_ignores_success_sessions() {
+        let terminal_view_id = EntityId::new();
+        let cli_sessions = [
+            (
+                terminal_view_id,
+                CLIAgentSessionStatus::Success,
+                false,
+                false,
+            ),
+            (EntityId::new(), CLIAgentSessionStatus::Success, true, false),
+        ];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            cli_sessions.iter().map(
+                |(terminal_view_id, status, has_rich_status, terminal_is_long_running)| {
+                    (
+                        *terminal_view_id,
+                        status,
+                        *has_rich_status,
+                        *terminal_is_long_running,
+                    )
+                },
+            ),
+            |_| None,
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 0);
+        assert_eq!(stats.waiting, 0);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_keeps_rich_blocked_session_waiting_while_terminal_runs() {
+        let terminal_view_id = EntityId::new();
+        let cli_sessions = [(
+            terminal_view_id,
+            CLIAgentSessionStatus::Blocked {
+                message: Some("Approval needed".to_string()),
+            },
+            true,
+            true,
+        )];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            cli_sessions.iter().map(
+                |(terminal_view_id, status, has_rich_status, terminal_is_long_running)| {
+                    (
+                        *terminal_view_id,
+                        status,
+                        *has_rich_status,
+                        *terminal_is_long_running,
+                    )
+                },
+            ),
+            |_| None,
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 0);
+        assert_eq!(stats.waiting, 1);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_counts_ambient_task_states() {
+        let queued_task = test_task_id(1);
+        let in_progress_task = test_task_id(2);
+        let blocked_task = test_task_id(3);
+        let success_task = test_task_id(4);
+        let historical_success_task = test_task_id(5);
+        let failed_task = test_task_id(6);
+        let tasks = [
+            (queued_task, AmbientAgentTaskState::Queued),
+            (in_progress_task, AmbientAgentTaskState::InProgress),
+            (blocked_task, AmbientAgentTaskState::Blocked),
+            (success_task, AmbientAgentTaskState::Succeeded),
+            (historical_success_task, AmbientAgentTaskState::Succeeded),
+            (failed_task, AmbientAgentTaskState::Failed),
+        ];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            std::iter::empty(),
+            |_| None,
+            tasks.iter().map(|(task_id, state)| (*task_id, state)),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 2);
+        assert_eq!(stats.waiting, 1);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_counts_open_conversations() {
+        let statuses = [
+            ConversationStatus::InProgress,
+            ConversationStatus::Success,
+            ConversationStatus::Blocked {
+                blocked_action: "Waiting for answer".to_string(),
+            },
+            ConversationStatus::Error,
+            ConversationStatus::Cancelled,
+        ];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            std::iter::empty(),
+            |_| None,
+            std::iter::empty(),
+            statuses.iter(),
+        );
+
+        assert_eq!(stats.working, 1);
+        assert_eq!(stats.waiting, 1);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_dedupes_cli_session_for_open_ambient_task() {
+        let terminal_view_id = EntityId::new();
+        let task_id = test_task_id(7);
+        let cli_sessions = [(
+            terminal_view_id,
+            CLIAgentSessionStatus::InProgress,
+            true,
+            false,
+        )];
+        let tasks = [(task_id, AmbientAgentTaskState::InProgress)];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            cli_sessions.iter().map(
+                |(terminal_view_id, status, has_rich_status, terminal_is_long_running)| {
+                    (
+                        *terminal_view_id,
+                        status,
+                        *has_rich_status,
+                        *terminal_is_long_running,
+                    )
+                },
+            ),
+            |id| (id == terminal_view_id).then_some(task_id),
+            tasks.iter().map(|(task_id, state)| (*task_id, state)),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 1);
+        assert_eq!(stats.waiting, 0);
     }
 
     #[test]

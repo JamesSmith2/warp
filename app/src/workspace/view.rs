@@ -30,9 +30,9 @@ use crate::workspace::cross_window_tab_drag::{
 };
 pub(crate) use onboarding::OnboardingTutorial;
 
-use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
-use crate::ai::agent_conversations_model::AgentConversationsModel;
+use crate::ai::active_agent_views_model::{ActiveAgentViewsEvent, ActiveAgentViewsModel};
 use crate::ai::agent_conversations_model::ConversationOrTask;
+use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
 use crate::ai::agent_management::notifications::toast_stack::AgentNotificationToastStack;
 use crate::ai::agent_management::notifications::view::{
     NotificationMailboxView, NotificationMailboxViewEvent,
@@ -434,6 +434,7 @@ use super::action::{
 };
 
 const WORKSPACE_GROUP_NOTIFICATION_FLASH_INTERVAL: Duration = Duration::from_millis(550);
+const WORKSPACE_GROUP_ACTIVITY_ANIMATION_INTERVAL: Duration = Duration::from_millis(125);
 use super::close_session_confirmation_dialog::{
     CloseSessionConfirmationDialog, CloseSessionConfirmationEvent, OpenDialogSource,
 };
@@ -965,6 +966,8 @@ pub struct Workspace {
     show_workspace_group_context_menu: Option<(usize, Vector2F)>,
     workspace_group_notification_flash_handle: Option<SpawnedFutureHandle>,
     workspace_group_notification_flash_on: bool,
+    workspace_group_activity_animation_handle: Option<SpawnedFutureHandle>,
+    workspace_group_activity_animation_frame: usize,
     // TODO(CORE-2300): this used to be add_tab_dropdown_menu.
     // Because we are rolling out the change behind a feature flag,
     // keep this comment here until the feature flag is removed.
@@ -2969,6 +2972,19 @@ impl Workspace {
         ctx.subscribe_to_model(&CLIAgentSessionsModel::handle(ctx), |me, _, event, ctx| {
             me.handle_cli_agent_sessions_event(event, ctx);
         });
+        ctx.subscribe_to_model(
+            &AgentConversationsModel::handle(ctx),
+            |me, _, event, ctx| {
+                me.handle_agent_conversations_event(event, ctx);
+            },
+        );
+        let workspace_view_id = ctx.view_id();
+        AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+            model.register_view_open(window_id, workspace_view_id, ctx);
+        });
+        ctx.subscribe_to_model(&ActiveAgentViewsModel::handle(ctx), |me, _, event, ctx| {
+            me.handle_active_agent_views_event(event, ctx);
+        });
 
         ctx.subscribe_to_model(
             &AgentNotificationsModel::handle(ctx),
@@ -3233,6 +3249,8 @@ impl Workspace {
             show_workspace_group_context_menu: None,
             workspace_group_notification_flash_handle: None,
             workspace_group_notification_flash_on: false,
+            workspace_group_activity_animation_handle: None,
+            workspace_group_activity_animation_frame: 0,
             close_workspace_group_confirmation_dialog:
                 Self::build_close_workspace_group_confirmation_dialog(ctx),
             new_session_dropdown_menu,
@@ -3856,6 +3874,7 @@ impl Workspace {
         }
 
         if self.agent_conversation_event_affects_vertical_tabs(event, ctx) {
+            self.sync_workspace_group_activity_animation(ctx);
             ctx.notify();
         }
     }
@@ -3964,6 +3983,51 @@ impl Workspace {
         self.workspace_group_notification_flash_handle = Some(handle);
     }
 
+    fn sync_workspace_group_activity_animation(&mut self, ctx: &mut ViewContext<Self>) {
+        if !Self::workspace_groups_enabled(ctx)
+            || !self.has_workspace_group_running_terminal_activity(ctx)
+        {
+            if let Some(handle) = self.workspace_group_activity_animation_handle.take() {
+                handle.abort();
+            }
+            if self.workspace_group_activity_animation_frame != 0 {
+                self.workspace_group_activity_animation_frame = 0;
+                ctx.notify();
+            }
+            return;
+        }
+
+        self.schedule_workspace_group_activity_animation_tick(ctx);
+    }
+
+    fn schedule_workspace_group_activity_animation_tick(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.workspace_group_activity_animation_handle.is_some() {
+            return;
+        }
+
+        let handle = ctx.spawn_abortable(
+            Timer::after(WORKSPACE_GROUP_ACTIVITY_ANIMATION_INTERVAL),
+            |workspace, _, ctx| {
+                workspace.workspace_group_activity_animation_handle = None;
+                if !Self::workspace_groups_enabled(ctx)
+                    || !workspace.has_workspace_group_running_terminal_activity(ctx)
+                {
+                    workspace.workspace_group_activity_animation_frame = 0;
+                    ctx.notify();
+                    return;
+                }
+
+                workspace.workspace_group_activity_animation_frame =
+                    (workspace.workspace_group_activity_animation_frame + 1)
+                        % workspace_groups::WORKSPACE_ACTIVITY_ANIMATION_FRAME_COUNT;
+                workspace.schedule_workspace_group_activity_animation_tick(ctx);
+                ctx.notify();
+            },
+            |_, _| {},
+        );
+        self.workspace_group_activity_animation_handle = Some(handle);
+    }
+
     fn agent_conversation_event_affects_vertical_tabs(
         &self,
         event: &BlocklistAIHistoryEvent,
@@ -3980,6 +4044,7 @@ impl Workspace {
                 | BlocklistAIHistoryEvent::SplitConversation { .. }
                 | BlocklistAIHistoryEvent::RestoredConversations { .. }
                 | BlocklistAIHistoryEvent::UpdatedConversationMetadata { .. }
+                | BlocklistAIHistoryEvent::UpdatedConversationStatus { .. }
         ) && event.terminal_view_id().is_some_and(|terminal_view_id| {
             self.workspace_contains_terminal_view(terminal_view_id, ctx)
         })
@@ -3996,8 +4061,44 @@ impl Workspace {
                 | CLIAgentSessionsModelEvent::StatusChanged { .. }
                 | CLIAgentSessionsModelEvent::Ended { .. }
                 | CLIAgentSessionsModelEvent::SessionUpdated { .. }
-        ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
-        {
+        ) {
+            if self.workspace_contains_terminal_view(event.terminal_view_id(), ctx) {
+                self.sync_workspace_group_activity_animation(ctx);
+            }
+            ctx.notify();
+        }
+    }
+
+    fn handle_agent_conversations_event(
+        &mut self,
+        event: &AgentConversationsModelEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if matches!(
+            event,
+            AgentConversationsModelEvent::ConversationsLoaded
+                | AgentConversationsModelEvent::NewTasksReceived
+                | AgentConversationsModelEvent::TasksUpdated
+                | AgentConversationsModelEvent::ConversationUpdated
+                | AgentConversationsModelEvent::ConversationArtifactsUpdated { .. }
+        ) {
+            ctx.notify();
+        }
+    }
+
+    fn handle_active_agent_views_event(
+        &mut self,
+        event: &ActiveAgentViewsEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if matches!(
+            event,
+            ActiveAgentViewsEvent::ConversationClosed { .. }
+                | ActiveAgentViewsEvent::TerminalViewFocused
+                | ActiveAgentViewsEvent::AmbientSessionOpened { .. }
+                | ActiveAgentViewsEvent::AmbientSessionClosed { .. }
+                | ActiveAgentViewsEvent::WindowClosed
+        ) {
             ctx.notify();
         }
     }
@@ -4076,6 +4177,7 @@ impl Workspace {
                     self.close_vertical_tabs_settings_popup();
                     self.vertical_tabs_panel.clear_detail_sidecar();
                 }
+                self.sync_workspace_group_activity_animation(ctx);
                 self.sync_panel_positions_from_config(ctx);
                 self.sync_window_button_visibility(ctx);
                 ctx.notify();
@@ -14489,6 +14591,7 @@ impl Workspace {
             }
             pane_group::Event::TerminalViewStateChanged => {
                 self.update_active_session(ctx);
+                self.sync_workspace_group_activity_animation(ctx);
                 ctx.notify();
             }
             pane_group::Event::OnboardingTutorialCompleted => {

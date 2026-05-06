@@ -385,10 +385,24 @@ impl TerminalView {
             return Some((agent, None));
         }
 
+        if let Some(agent) = CLIAgent::detect(&command, None, None, ctx) {
+            return Some((agent, None));
+        }
+
         CompiledCommandsForCodingAgentToolbar::matched_agent(ctx, &command).map(|agent| {
             let prefix = command.split_whitespace().next().map(str::to_owned);
             (agent, prefix)
         })
+    }
+
+    pub(crate) fn detected_cli_agent_for_active_long_running_command(
+        &self,
+        ctx: &AppContext,
+    ) -> Option<CLIAgent> {
+        let model = self.model.lock();
+        self.detect_cli_agent_from_model(&model, ctx)
+            .map(|(agent, _)| agent)
+            .filter(|agent| !matches!(agent, CLIAgent::Unknown))
     }
 
     /// Updates the UI during a long running command to agent "tagged-in state".
