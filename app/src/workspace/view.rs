@@ -87,6 +87,10 @@ use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::system::{SystemInfo, SystemInfoEvent};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::terminal::cli_agent_sessions::claude_rate_limits::{
+    ClaudeRateLimitUsageModel, ClaudeRateLimitUsageModelEvent,
+};
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::terminal::cli_agent_sessions::codex_rate_limits::{
     CodexRateLimitUsageModel, CodexRateLimitUsageModelEvent, CodexRateLimitWindowKind,
 };
@@ -126,6 +130,8 @@ use crate::ai::blocklist::FORK_PREFIX;
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::{plugin_manager_for, PluginModalKind};
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::terminal::CLIAgent;
 use crate::workspace::header_toolbar_editor::{HeaderToolbarEditorEvent, HeaderToolbarEditorModal};
 use crate::workspace::header_toolbar_item::HeaderToolbarItemKind;
 use crate::workspace::tab_settings::TabCloseButtonPosition;
@@ -2731,6 +2737,13 @@ impl Workspace {
                 }
             },
         );
+        #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+        ctx.subscribe_to_model(
+            &ClaudeRateLimitUsageModel::handle(ctx),
+            |_, _, event, ctx| match event {
+                ClaudeRateLimitUsageModelEvent::Refreshed => ctx.notify(),
+            },
+        );
 
         let palette =
             ctx.add_typed_action_view(|ctx| CommandPalette::new(NavigationMode::Normal, ctx));
@@ -4055,6 +4068,14 @@ impl Workspace {
         event: &CLIAgentSessionsModelEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+        if event.agent() == CLIAgent::Claude
+            && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
+        {
+            ClaudeRateLimitUsageModel::handle(ctx)
+                .update(ctx, |model, ctx| model.request_refresh(ctx));
+        }
+
         if matches!(
             event,
             CLIAgentSessionsModelEvent::Started { .. }
@@ -4323,6 +4344,35 @@ impl Workspace {
             self.persist_active_workspace_group();
         }
 
+        self.append_launch_config_workspace_groups(window, ctx);
+    }
+
+    fn replace_launch_config_workspace_groups_for_import(
+        &mut self,
+        window: WindowTemplate,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.enable_workspace_groups_for_import(ctx);
+        if !Self::workspace_groups_enabled(ctx) {
+            let mut fallback_window = window;
+            fallback_window.workspace_groups.clear();
+            fallback_window.active_workspace_group_index = None;
+            self.open_launch_config_window(fallback_window, ctx);
+            return;
+        }
+
+        self.workspace_groups.clear();
+        self.tabs.clear();
+        self.active_tab_index = 0;
+        self.active_workspace_group_index = 0;
+        self.append_launch_config_workspace_groups(window, ctx);
+    }
+
+    fn append_launch_config_workspace_groups(
+        &mut self,
+        window: WindowTemplate,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let imported_group_start_index = self.workspace_groups.len();
         let imported_group_count = window.workspace_groups.len();
         for (group_offset, group_template) in window.workspace_groups.into_iter().enumerate() {
@@ -4466,7 +4516,11 @@ impl Workspace {
             return;
         };
 
-        self.open_launch_config_window(import_window, ctx);
+        if import_window.workspace_groups.is_empty() {
+            self.open_launch_config_window(import_window, ctx);
+        } else {
+            self.replace_launch_config_workspace_groups_for_import(import_window, ctx);
+        }
         send_telemetry_from_ctx!(
             TelemetryEvent::OpenLaunchConfig {
                 ui_location: LaunchConfigUiLocation::WorkspacesPanel,

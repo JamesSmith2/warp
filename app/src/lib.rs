@@ -1772,6 +1772,9 @@ fn initialize_app(
         ctx.add_singleton_model(
             terminal::cli_agent_sessions::codex_rate_limits::CodexRateLimitUsageModel::new,
         );
+        ctx.add_singleton_model(
+            terminal::cli_agent_sessions::claude_rate_limits::ClaudeRateLimitUsageModel::new,
+        );
     }
 
     // Add a singleton model that holds the current prompt configuration.

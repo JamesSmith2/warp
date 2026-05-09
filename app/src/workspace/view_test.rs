@@ -52,6 +52,7 @@ use crate::system::SystemInfo;
 use crate::system::SystemStats;
 use crate::tab_configs::tab_config::{TabConfigPaneNode, TabConfigPaneType};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::terminal::cli_agent_sessions::claude_rate_limits::ClaudeRateLimitUsageModel;
 use crate::terminal::cli_agent_sessions::codex_rate_limits::CodexRateLimitUsageModel;
 use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
@@ -117,6 +118,8 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(SystemInfo::new);
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     app.add_singleton_model(CodexRateLimitUsageModel::new_for_test);
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    app.add_singleton_model(ClaudeRateLimitUsageModel::new_for_test);
     app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(CloudModel::mock);
     app.add_singleton_model(UserWorkspaces::default_mock);
@@ -3070,6 +3073,53 @@ fn test_window_workspace_groups_detects_running_activity_in_inactive_group() {
                     &CLIAgentEvent {
                         v: 1,
                         agent: CLIAgent::Codex,
+                        event: CLIAgentEventType::PromptSubmit,
+                        session_id: None,
+                        cwd: None,
+                        project: None,
+                        payload: CLIAgentEventPayload::default(),
+                    },
+                    ctx,
+                );
+            });
+
+            assert!(
+                workspace.workspace_group_has_running_terminal_activity(0, ctx),
+                "a non-rich Codex received notification should resume activity while the Codex TUI remains open"
+            );
+            assert!(workspace.has_workspace_group_running_terminal_activity(ctx));
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.update_from_event(
+                    inactive_terminal_view_id,
+                    &CLIAgentEvent {
+                        v: 1,
+                        agent: CLIAgent::Codex,
+                        event: CLIAgentEventType::Stop,
+                        session_id: None,
+                        cwd: None,
+                        project: None,
+                        payload: CLIAgentEventPayload {
+                            query: Some("Second turn complete".to_string()),
+                            ..Default::default()
+                        },
+                    },
+                    ctx,
+                );
+            });
+
+            assert!(
+                !workspace.workspace_group_has_running_terminal_activity(0, ctx),
+                "a later non-rich Codex stop notification should clear resumed activity"
+            );
+            assert!(!workspace.has_workspace_group_running_terminal_activity(ctx));
+
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.update_from_event(
+                    inactive_terminal_view_id,
+                    &CLIAgentEvent {
+                        v: 1,
+                        agent: CLIAgent::Codex,
                         event: CLIAgentEventType::PermissionRequest,
                         session_id: None,
                         cwd: None,
@@ -3393,26 +3443,17 @@ fn test_window_workspace_groups_imports_active_yaml_window_into_current_window()
         .expect("workspace import file should be written");
 
         let window_count_before = app.read(|ctx| ctx.window_ids().count());
-        let workspace_group_count_before =
-            workspace.read(&app, |workspace, _| workspace.workspace_group_count());
-
         workspace.update(&mut app, |workspace, ctx| {
             workspace.import_workspaces_from_file(&import_path, ctx);
             assert!(*TabSettings::as_ref(ctx).use_window_workspace_groups);
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
             assert_eq!(
-                workspace.workspace_group_count(),
-                workspace_group_count_before + 2
-            );
-            assert_eq!(
-                workspace.active_workspace_group_index(),
-                workspace_group_count_before + 1
-            );
-            assert_eq!(
-                workspace.workspace_groups[workspace_group_count_before].color,
+                workspace.workspace_groups[0].color,
                 crate::app_state::WorkspaceGroupColor::Green
             );
             assert_eq!(
-                workspace.workspace_groups[workspace_group_count_before + 1].color,
+                workspace.workspace_groups[1].color,
                 crate::app_state::WorkspaceGroupColor::Magenta
             );
             assert_eq!(workspace.tab_count(), 1);
@@ -3424,10 +3465,7 @@ fn test_window_workspace_groups_imports_active_yaml_window_into_current_window()
                 "Deploy"
             );
 
-            workspace.handle_action(
-                &WorkspaceAction::ActivateWorkspaceGroup(workspace_group_count_before),
-                ctx,
-            );
+            workspace.handle_action(&WorkspaceAction::ActivateWorkspaceGroup(0), ctx);
             assert_eq!(workspace.tab_count(), 2);
             assert_eq!(workspace.active_tab_index(), 1);
             assert_eq!(
@@ -3436,6 +3474,20 @@ fn test_window_workspace_groups_imports_active_yaml_window_into_current_window()
                     .as_ref(ctx)
                     .display_title(ctx),
                 "Worker"
+            );
+
+            workspace.import_workspaces_from_file(&import_path, ctx);
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert_eq!(workspace.workspace_groups[0].name, "Backend");
+            assert_eq!(workspace.workspace_groups[1].name, "Ops");
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .display_title(ctx),
+                "Deploy"
             );
         });
 

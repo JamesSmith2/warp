@@ -9,6 +9,11 @@ use crate::appearance::Appearance;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::system::{ResourceUsageSample, SystemInfo};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::terminal::cli_agent_sessions::claude_rate_limits::{
+    ClaudeRateLimitUsage, ClaudeRateLimitUsageModel, ClaudeRateLimitWindowKind,
+    ClaudeRateLimitWindowUsage,
+};
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::terminal::cli_agent_sessions::codex_rate_limits::{
     estimate_codex_rate_limit_projection, estimate_codex_rate_limit_window_projection,
     CodexRateLimitProjection, CodexRateLimitUsage, CodexRateLimitUsageModel,
@@ -24,6 +29,7 @@ use crate::BlocklistAIHistoryModel;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use chrono::{DateTime, Local, Utc};
 use pathfinder_geometry::vector::vec2f;
+use std::time::{Duration, Instant};
 use ui_components::tooltip::{Params as TooltipParams, Tooltip as TooltipComponent};
 use ui_components::{Component as _, Options as ComponentOptions};
 use warp_core::ui::color::coloru_with_opacity;
@@ -102,6 +108,14 @@ enum AgentActivity {
     Working,
     Waiting,
 }
+
+/// Maximum time we trust an `InProgress` status for an agent that lacks a
+/// reliable completion event (notably Codex, which only emits a `Received.`
+/// OSC 9 at prompt submission and no matching turn-complete signal). After
+/// this window without a fresh in-progress event, the workspace activity
+/// indicators (per-group spinner and Working/Waiting summary) drop the
+/// session out of the working count to avoid a stuck animation.
+const NON_RICH_AGENT_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(180);
 
 impl Workspace {
     pub(super) fn render_workspace_groups_panel(&self, app: &AppContext) -> Box<dyn Element> {
@@ -508,17 +522,30 @@ impl Workspace {
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
         let stats = Self::workspace_resource_stats(app);
-        let codex_usage = CodexRateLimitUsageModel::as_ref(app).usage();
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
         column.add_child(Self::render_workspace_agent_summary_stats(
             self.workspace_agent_summary_stats(app),
             appearance,
         ));
-        column.add_child(Self::render_codex_rate_limit_stats(
-            &codex_usage,
-            appearance,
-        ));
+        match self.focused_pane_cli_agent(app) {
+            Some(CLIAgent::Claude) => {
+                let claude_usage = ClaudeRateLimitUsageModel::as_ref(app).usage();
+                column.add_child(Self::render_claude_rate_limit_stats(
+                    &claude_usage,
+                    appearance,
+                ));
+            }
+            // Default to Codex for any other (or no) focused agent so existing
+            // behavior is preserved when no Claude pane is focused.
+            _ => {
+                let codex_usage = CodexRateLimitUsageModel::as_ref(app).usage();
+                column.add_child(Self::render_codex_rate_limit_stats(
+                    &codex_usage,
+                    appearance,
+                ));
+            }
+        }
         column.add_child(Self::render_resource_metric_row(
             "CPU",
             Self::workspace_resource_percent_label(Some(stats.cpu_usage)),
@@ -652,6 +679,142 @@ impl Workspace {
         .finish()
     }
 
+    /// Returns the [`CLIAgent`] for the focused pane's active CLI session,
+    /// if any. Used to choose which rate-limit card to render in the
+    /// workspace resource panel.
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn focused_pane_cli_agent(&self, app: &AppContext) -> Option<CLIAgent> {
+        let pane_group = self.active_tab_pane_group().as_ref(app);
+        let terminal_view = pane_group.focused_session_view(app)?;
+        let session = CLIAgentSessionsModel::as_ref(app).session(terminal_view.id())?;
+        Some(session.agent)
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_claude_rate_limit_stats(
+        usage: &ClaudeRateLimitUsage,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        let current = usage.current.as_ref();
+
+        if let Some(primary) = current.and_then(|sample| sample.primary.as_ref()) {
+            column.add_child(Self::render_claude_rate_limit_card(primary, appearance));
+        }
+        if let Some(secondary) = current.and_then(|sample| sample.secondary.as_ref()) {
+            column.add_child(Self::render_claude_rate_limit_card(secondary, appearance));
+        }
+        if let Some(label) = Self::claude_rate_limit_status_label(usage) {
+            column.add_child(Self::render_codex_rate_limit_status(label, appearance));
+        }
+
+        Container::new(column.finish())
+            .with_padding_bottom(2.)
+            .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn render_claude_rate_limit_card(
+        window: &ClaudeRateLimitWindowUsage,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let title_color = theme.sub_text_color(theme.background()).into();
+        let value_color = theme.main_text_color(theme.background()).into();
+        let reset_color = theme.sub_text_color(theme.background()).into();
+        let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+        column.add_child(
+            Text::new_inline(
+                Self::claude_rate_limit_window_title(window),
+                appearance.ui_font_family(),
+                RESOURCE_METRIC_FONT_SIZE,
+            )
+            .with_color(title_color)
+            .finish(),
+        );
+        column.add_child(
+            Container::new(
+                Text::new_inline(
+                    Self::codex_rate_limit_remaining_label(window.remaining_percent),
+                    appearance.ui_font_family(),
+                    RESOURCE_METRIC_FONT_SIZE,
+                )
+                .with_color(value_color)
+                .finish(),
+            )
+            .with_padding_top(2.)
+            .finish(),
+        );
+        column.add_child(
+            Container::new(Self::render_codex_rate_limit_bar(
+                Self::codex_rate_limit_progress_fraction(window.remaining_percent),
+                appearance,
+            ))
+            .with_padding_top(6.)
+            .finish(),
+        );
+        column.add_child(
+            Container::new(
+                Text::new_inline(
+                    Self::claude_rate_limit_reset_label(window),
+                    appearance.ui_font_family(),
+                    RESOURCE_TIME_FONT_SIZE,
+                )
+                .with_color(reset_color)
+                .finish(),
+            )
+            .with_padding_top(6.)
+            .finish(),
+        );
+
+        Container::new(
+            ConstrainedBox::new(column.finish())
+                .with_width(RESOURCE_MONITOR_CONTENT_WIDTH)
+                .finish(),
+        )
+        .with_padding_bottom(8.)
+        .finish()
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn claude_rate_limit_window_title(window: &ClaudeRateLimitWindowUsage) -> String {
+        match window.kind {
+            ClaudeRateLimitWindowKind::Primary => "5 hour usage limit".to_string(),
+            ClaudeRateLimitWindowKind::Secondary => "Weekly usage limit".to_string(),
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn claude_rate_limit_reset_label(window: &ClaudeRateLimitWindowUsage) -> String {
+        match window.resets_at {
+            Some(resets_at) => {
+                let local_reset = resets_at.with_timezone(&Local);
+                let is_long_window = matches!(window.kind, ClaudeRateLimitWindowKind::Secondary);
+                if is_long_window {
+                    format!("Resets {}", local_reset.format("%b %d %H:%M"))
+                } else {
+                    format!("Resets {}", local_reset.format("%H:%M"))
+                }
+            }
+            None => "Reset unavailable".to_string(),
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn claude_rate_limit_status_label(usage: &ClaudeRateLimitUsage) -> Option<String> {
+        if usage.is_stale {
+            return Some("Stale".to_string());
+        }
+        if usage.last_error.is_some() && usage.current.is_none() {
+            return Some("Unavailable".to_string());
+        }
+        if usage.current.is_none() {
+            return Some("Loading".to_string());
+        }
+        None
+    }
+
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn render_codex_rate_limit_stats(
         usage: &CodexRateLimitUsage,
@@ -685,11 +848,12 @@ impl Workspace {
             ));
         }
 
-        let status_label = Self::codex_rate_limit_status_label(usage, now);
-        column.add_child(Self::render_codex_rate_limit_status(
-            status_label,
-            appearance,
-        ));
+        if let Some(status_label) = Self::codex_rate_limit_status_label(usage, now) {
+            column.add_child(Self::render_codex_rate_limit_status(
+                status_label,
+                appearance,
+            ));
+        }
 
         Container::new(column.finish())
             .with_padding_bottom(2.)
@@ -1013,27 +1177,26 @@ impl Workspace {
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
-    fn codex_rate_limit_status_label(usage: &CodexRateLimitUsage, now: DateTime<Utc>) -> String {
+    fn codex_rate_limit_status_label(
+        usage: &CodexRateLimitUsage,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
         if usage.is_stale {
-            return "Stale".to_string();
+            return Some("Stale".to_string());
         }
         if usage.last_error.is_some() && usage.current.is_none() {
-            return "Unavailable".to_string();
+            return Some("Unavailable".to_string());
         }
         match estimate_codex_rate_limit_projection(usage, now) {
-            CodexRateLimitProjection::EmptyNow => "Limit reached".to_string(),
-            CodexRateLimitProjection::EmptyAt(empty_at) => {
-                format!(
-                    "Empty in {}",
-                    Self::format_codex_rate_limit_duration(empty_at - now)
-                )
-            }
-            CodexRateLimitProjection::ResetsAt(resets_at) => {
-                format!("Reset {}", resets_at.with_timezone(&Local).format("%H:%M"))
-            }
-            CodexRateLimitProjection::Stable if usage.current.is_some() => "Stable".to_string(),
-            CodexRateLimitProjection::Stable => "Loading".to_string(),
-            CodexRateLimitProjection::Unknown => "Waiting for data".to_string(),
+            CodexRateLimitProjection::EmptyNow => Some("Limit reached".to_string()),
+            CodexRateLimitProjection::EmptyAt(empty_at) => Some(format!(
+                "Empty in {}",
+                Self::format_codex_rate_limit_duration(empty_at - now)
+            )),
+            CodexRateLimitProjection::ResetsAt(_) => None,
+            CodexRateLimitProjection::Stable if usage.current.is_some() => None,
+            CodexRateLimitProjection::Stable => Some("Loading".to_string()),
+            CodexRateLimitProjection::Unknown => Some("Waiting for data".to_string()),
         }
     }
 
@@ -1095,6 +1258,7 @@ impl Workspace {
                             session.agent,
                             app,
                         ),
+                        cli_sessions.last_active_event_at(terminal_view_id),
                     )
                 }),
             |terminal_view_id| active_views.ambient_task_id_for_terminal_view(terminal_view_id),
@@ -1112,15 +1276,28 @@ impl Workspace {
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn workspace_agent_summary_stats_from_sources<'a>(
-        cli_session_statuses: impl Iterator<Item = (EntityId, &'a CLIAgentSessionStatus, bool, bool)>,
+        cli_session_statuses: impl Iterator<
+            Item = (
+                EntityId,
+                &'a CLIAgentSessionStatus,
+                bool,
+                bool,
+                Option<Instant>,
+            ),
+        >,
         terminal_ambient_task_id: impl Fn(EntityId) -> Option<AmbientAgentTaskId>,
         task_statuses: impl Iterator<Item = (AmbientAgentTaskId, &'a AmbientAgentTaskState)>,
         open_conversation_statuses: impl Iterator<Item = &'a ConversationStatus>,
     ) -> AgentSummaryStats {
         let mut stats = AgentSummaryStats::default();
 
-        for (terminal_view_id, status, has_rich_status, terminal_is_running_cli_agent) in
-            cli_session_statuses
+        for (
+            terminal_view_id,
+            status,
+            has_rich_status,
+            terminal_is_running_cli_agent,
+            last_active_event_at,
+        ) in cli_session_statuses
         {
             if terminal_ambient_task_id(terminal_view_id).is_some() {
                 continue;
@@ -1131,6 +1308,7 @@ impl Workspace {
                     status,
                     has_rich_status,
                     terminal_is_running_cli_agent,
+                    last_active_event_at,
                 ),
             );
         }
@@ -1150,7 +1328,8 @@ impl Workspace {
         terminal_view: &TerminalView,
         app: &AppContext,
     ) -> Option<AgentActivity> {
-        if let Some(session) = CLIAgentSessionsModel::as_ref(app).session(terminal_view.id()) {
+        let cli_sessions = CLIAgentSessionsModel::as_ref(app);
+        if let Some(session) = cli_sessions.session(terminal_view.id()) {
             let terminal_is_running_cli_agent = terminal_view
                 .detected_cli_agent_for_active_long_running_command(app)
                 .is_some_and(|agent| agent == session.agent);
@@ -1158,6 +1337,7 @@ impl Workspace {
                 &session.status,
                 session.listener.is_some() && agent_supports_rich_status(&session.agent),
                 terminal_is_running_cli_agent,
+                cli_sessions.last_active_event_at(terminal_view.id()),
             ) {
                 return Some(activity);
             }
@@ -1192,12 +1372,18 @@ impl Workspace {
         status: &CLIAgentSessionStatus,
         has_rich_status: bool,
         terminal_is_running_cli_agent: bool,
+        last_active_event_at: Option<Instant>,
     ) -> Option<AgentActivity> {
         if has_rich_status {
             return Self::cli_agent_activity_from_status(status);
         }
 
-        (terminal_is_running_cli_agent && matches!(status, CLIAgentSessionStatus::InProgress))
+        if !terminal_is_running_cli_agent || !matches!(status, CLIAgentSessionStatus::InProgress) {
+            return None;
+        }
+
+        last_active_event_at
+            .is_some_and(|t| t.elapsed() < NON_RICH_AGENT_ACTIVITY_TIMEOUT)
             .then_some(AgentActivity::Working)
     }
 
@@ -1435,6 +1621,7 @@ mod tests {
                         status,
                         *has_rich_status,
                         *terminal_is_long_running,
+                        Some(Instant::now()),
                     )
                 },
             ),
@@ -1465,6 +1652,7 @@ mod tests {
                         status,
                         *has_rich_status,
                         *terminal_is_long_running,
+                        Some(Instant::now()),
                     )
                 },
             ),
@@ -1521,6 +1709,7 @@ mod tests {
                         status,
                         *has_rich_status,
                         *terminal_is_long_running,
+                        Some(Instant::now()),
                     )
                 },
             ),
@@ -1554,6 +1743,7 @@ mod tests {
                         status,
                         *has_rich_status,
                         *terminal_is_long_running,
+                        Some(Instant::now()),
                     )
                 },
             ),
@@ -1586,6 +1776,7 @@ mod tests {
                         status,
                         *has_rich_status,
                         *terminal_is_long_running,
+                        Some(Instant::now()),
                     )
                 },
             ),
@@ -1669,6 +1860,7 @@ mod tests {
                         status,
                         *has_rich_status,
                         *terminal_is_long_running,
+                        Some(Instant::now()),
                     )
                 },
             ),
@@ -1818,7 +2010,7 @@ mod tests {
                 &CodexRateLimitUsage::default(),
                 DateTime::UNIX_EPOCH,
             ),
-            "Loading"
+            Some("Loading".to_string())
         );
     }
 
@@ -1850,7 +2042,7 @@ mod tests {
 
         assert_eq!(
             Workspace::codex_rate_limit_status_label(&usage, base + chrono::Duration::minutes(20),),
-            "Empty in 10m"
+            Some("Empty in 10m".to_string())
         );
     }
 
@@ -1927,7 +2119,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_rate_limit_status_label_prefers_reset_when_it_happens_first() {
+    fn codex_rate_limit_status_label_omits_duplicate_reset_footer() {
         let base = DateTime::UNIX_EPOCH;
         let reset = base + chrono::Duration::minutes(25);
         let history = vec![
@@ -1954,7 +2146,7 @@ mod tests {
 
         assert_eq!(
             Workspace::codex_rate_limit_status_label(&usage, base + chrono::Duration::minutes(20),),
-            format!("Reset {}", reset.with_timezone(&Local).format("%H:%M"))
+            None
         );
     }
 }

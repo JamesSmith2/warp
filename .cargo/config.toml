@@ -11,6 +11,10 @@ MACOSX_DEPLOYMENT_TARGET = "10.14"
 [build]
 rustflags = ["-C", "symbol-mangling-version=v0", "-C", "link-args=-Wl,-headerpad_max_install_names"]
 
+[alias]
+warp-fast-build = "build -p warp --bin warp-oss --profile release-local --no-default-features --features local_fast_defaults,fast_dev"
+warp-fast-run = "run -p warp --bin warp-oss --profile release-local --no-default-features --features local_fast_defaults,fast_dev"
+
 [net]
 git-fetch-with-cli = true
 

@@ -1,4 +1,6 @@
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+pub(crate) mod claude_rate_limits;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 pub(crate) mod codex_rate_limits;
 pub mod event;
 pub mod listener;
@@ -6,6 +8,7 @@ pub mod listener;
 pub(crate) mod plugin_manager;
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
@@ -252,6 +255,16 @@ pub enum CLIAgentSessionsModelEvent {
 }
 
 impl CLIAgentSessionsModelEvent {
+    pub fn agent(&self) -> CLIAgent {
+        match self {
+            CLIAgentSessionsModelEvent::Started { agent, .. }
+            | CLIAgentSessionsModelEvent::StatusChanged { agent, .. }
+            | CLIAgentSessionsModelEvent::InputSessionChanged { agent, .. }
+            | CLIAgentSessionsModelEvent::Ended { agent, .. }
+            | CLIAgentSessionsModelEvent::SessionUpdated { agent, .. } => *agent,
+        }
+    }
+
     pub fn terminal_view_id(&self) -> EntityId {
         match self {
             CLIAgentSessionsModelEvent::Started {
@@ -276,6 +289,11 @@ impl CLIAgentSessionsModelEvent {
 /// Singleton model that tracks pane-scoped CLI agent state and plugin-enriched session context.
 pub struct CLIAgentSessionsModel {
     sessions: HashMap<EntityId, CLIAgentSession>,
+    /// Wall-clock-free timestamp of the last event that transitioned a session
+    /// to `InProgress`. Used by UI consumers (e.g. workspace activity
+    /// indicators) to bound stuck `InProgress` states for agents that lack a
+    /// reliable completion signal (notably Codex over OSC 9).
+    last_active_event_at: HashMap<EntityId, Instant>,
     /// Tracks (agent, remote_host) pairs where an auto plugin operation (install or update) has failed.
     /// Shared across all views so failure in one tab is reflected everywhere.
     plugin_auto_failures: HashSet<(CLIAgent, Option<String>)>,
@@ -291,12 +309,21 @@ impl CLIAgentSessionsModel {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            last_active_event_at: HashMap::new(),
             plugin_auto_failures: HashSet::new(),
         }
     }
 
     pub fn session(&self, terminal_view_id: EntityId) -> Option<&CLIAgentSession> {
         self.sessions.get(&terminal_view_id)
+    }
+
+    /// Returns the timestamp of the last event that drove this session into
+    /// `InProgress`, if any. Consumers can use this to bound how long the UI
+    /// trusts an `InProgress` state from agents that don't reliably emit a
+    /// completion event (e.g. Codex via plain-text OSC 9).
+    pub fn last_active_event_at(&self, terminal_view_id: EntityId) -> Option<Instant> {
+        self.last_active_event_at.get(&terminal_view_id).copied()
     }
 
     pub fn sessions_iter(&self) -> impl Iterator<Item = (EntityId, &CLIAgentSession)> {
@@ -378,6 +405,7 @@ impl CLIAgentSessionsModel {
     }
 
     pub fn remove_session(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
+        self.last_active_event_at.remove(&terminal_view_id);
         if let Some(session) = self.sessions.remove(&terminal_view_id) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
@@ -400,6 +428,10 @@ impl CLIAgentSessionsModel {
         let event_type = &event.event;
         if let Some(new_status) = session.apply_event(event) {
             let agent = session.agent;
+            if matches!(new_status, CLIAgentSessionStatus::InProgress) {
+                self.last_active_event_at
+                    .insert(terminal_view_id, Instant::now());
+            }
             ctx.emit(CLIAgentSessionsModelEvent::StatusChanged {
                 terminal_view_id,
                 agent,
@@ -481,9 +513,16 @@ impl CLIAgentSessionsModel {
         ctx: &mut ModelContext<Self>,
     ) {
         let agent = session.agent;
+        let starts_in_progress = matches!(session.status, CLIAgentSessionStatus::InProgress);
         // Close any open rich input before replacing, so subscribers can
         // restore input config before the session ends.
         self.close_input(terminal_view_id, false, ctx);
+        if starts_in_progress {
+            self.last_active_event_at
+                .insert(terminal_view_id, Instant::now());
+        } else {
+            self.last_active_event_at.remove(&terminal_view_id);
+        }
         if let Some(old) = self.sessions.insert(terminal_view_id, session) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,

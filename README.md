@@ -102,6 +102,8 @@ To build and run Warp from source:
 ./script/bootstrap   # platform-specific setup
 ./script/run         # build and run Warp
 ./script/run --fast-build  # local fast build with default feature flags disabled
+./script/run --fast-release  # local optimized build with AI/cloud/Drive surfaces disabled
+cargo warp-fast-run  # raw Cargo fast local run without macOS app bundling
 ./script/presubmit   # fmt, clippy, and tests
 ```
 

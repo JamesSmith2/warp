@@ -390,6 +390,17 @@ debug = 1
 # Force the rust compiler to create a dSYM. Starting in 1.53 the default on MacOS is "unpacked".
 split-debuginfo = "packed"
 
+# A local-use optimized profile. This is intentionally not suitable for release
+# artifacts: it trades peak runtime performance and symbolication for faster
+# local builds, especially when iterating on the large `warp` crate.
+[profile.release-local]
+inherits = "release"
+opt-level = 1
+debug = 0
+split-debuginfo = "unpacked"
+incremental = true
+codegen-units = 256
+
 [profile.dev]
 # Use line-tables-only to speed up dev builds. Change to `debug = true` if you
 # need full debuginfo for step-through debugging (gdb/lldb).

@@ -6,10 +6,10 @@
 # as a real `.app` bundle (with code signing, plist updates, etc.). On Linux
 # and Windows it invokes `cargo run` directly for the appropriate binary.
 #
-# This script owns all cross-platform setup (running install_channel_config,
-# detecting internal vs OSS builds, and mapping legacy `--features` entries
-# to environment variables), so platform-specific scripts can assume those
-# values are already provided via environment variables.
+# This script owns all cross-platform setup (optionally running
+# install_channel_config, detecting internal vs OSS builds, and mapping legacy
+# `--features` entries to environment variables), so platform-specific scripts
+# can assume those values are already provided via environment variables.
 
 set -e
 
@@ -18,33 +18,68 @@ cd "${REPO_ROOT}"
 
 OS_TYPE="$(uname -s)"
 
-FEATURES="gui"
+BASE_FEATURES="gui"
+EXTRA_FEATURES=""
+FEATURES=""
 NO_DEFAULT_FEATURES=false
-
-add_feature() {
-    if [[ ! ",$FEATURES," =~ ,"$1", ]]; then
-        FEATURES="$FEATURES,$1"
-    fi
-}
-
-./script/install_channel_config || echo "Skipping internal channel config installation (no repo access)."
-
-# If warp_channel_config is on PATH, build the Local channel binary; otherwise build the OSS channel.
-if command -v warp-channel-config &>/dev/null; then
-    WARP_BIN_NAME="warp"
-    WARP_CHANNEL="local"
-else
-    WARP_BIN_NAME="warp-oss"
-    WARP_CHANNEL="oss"
-fi
-
-# Shared argument parsing. macOS-specific flags (--dont-open,
-# --open_with_launchd, --generate-schema) are forwarded through MAC_ARGS and
-# silently ignored on other platforms.
+PROFILE_SET=false
+FAST_LOCAL_BUILD=false
 MAC_ARGS=()
 CARGO_PARAMS=()
 WARP_ARGS=()
 
+append_feature() {
+    local var_name="$1"
+    local feature="$2"
+    local current="${!var_name}"
+    if [[ -z "$feature" ]]; then
+        return
+    fi
+    if [[ ! ",$current," =~ ,"$feature", ]]; then
+        if [[ -z "$current" ]]; then
+            printf -v "$var_name" "%s" "$feature"
+        else
+            printf -v "$var_name" "%s,%s" "$current" "$feature"
+        fi
+    fi
+}
+
+add_extra_feature() {
+    append_feature EXTRA_FEATURES "$1"
+}
+
+compose_features() {
+    FEATURES="$BASE_FEATURES"
+    local old_ifs="$IFS"
+    IFS=','
+    read -ra extra_features <<< "$EXTRA_FEATURES"
+    IFS="$old_ifs"
+    for feature in "${extra_features[@]}"; do
+        append_feature FEATURES "$feature"
+    done
+}
+
+add_no_default_features() {
+    if [ "$NO_DEFAULT_FEATURES" = false ]; then
+        CARGO_PARAMS+=("--no-default-features")
+        MAC_ARGS+=("--no-default-features")
+    fi
+    NO_DEFAULT_FEATURES=true
+}
+
+set_cargo_profile() {
+    if [ "$PROFILE_SET" = true ]; then
+        echo "Error: only one of --release, --profile, or --fast-release may be specified" >&2
+        exit 1
+    fi
+    CARGO_PARAMS+=("$@")
+    MAC_ARGS+=("$@")
+    PROFILE_SET=true
+}
+
+# Shared argument parsing. macOS-specific flags (--dont-open,
+# --open_with_launchd, --generate-schema) are forwarded through MAC_ARGS and
+# silently ignored on other platforms.
 while (( "$#" )); do
   case "$1" in
     --)
@@ -54,7 +89,7 @@ while (( "$#" )); do
       ;;
     --features)
       if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
-        add_feature "$2"
+        add_extra_feature "$2"
         shift 2
       else
         echo "Error: Argument for $1 is missing" >&2
@@ -62,20 +97,21 @@ while (( "$#" )); do
       fi
       ;;
     --fast-build)
-      if [ "$NO_DEFAULT_FEATURES" = false ]; then
-        CARGO_PARAMS+=("--no-default-features")
-        MAC_ARGS+=("--no-default-features")
-      fi
-      NO_DEFAULT_FEATURES=true
-      add_feature "fast_dev"
+      FAST_LOCAL_BUILD=true
+      add_no_default_features
+      add_extra_feature "fast_dev"
+      shift
+      ;;
+    --fast-release)
+      FAST_LOCAL_BUILD=true
+      add_no_default_features
+      BASE_FEATURES="local_fast_defaults"
+      add_extra_feature "fast_dev"
+      set_cargo_profile "--profile" "release-local"
       shift
       ;;
     --no-default-features)
-      if [ "$NO_DEFAULT_FEATURES" = false ]; then
-        CARGO_PARAMS+=("$1")
-        MAC_ARGS+=("$1")
-      fi
-      NO_DEFAULT_FEATURES=true
+      add_no_default_features
       shift
       ;;
     --host-id)
@@ -88,14 +124,12 @@ while (( "$#" )); do
       fi
       ;;
     --release)
-      CARGO_PARAMS+=("$1")
-      MAC_ARGS+=("$1")
+      set_cargo_profile "$1"
       shift
       ;;
     --profile)
       if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
-        CARGO_PARAMS+=("$1" "$2")
-        MAC_ARGS+=("$1" "$2")
+        set_cargo_profile "$1" "$2"
         shift 2
       else
         echo "Error: Argument for $1 is missing" >&2
@@ -110,6 +144,27 @@ while (( "$#" )); do
       ;;
   esac
 done
+
+compose_features
+
+if [ "$FAST_LOCAL_BUILD" = true ]; then
+    # Fast local builds intentionally avoid private channel config setup. This
+    # keeps the path close to `cargo run` and prevents SSH/GitHub probes for
+    # OSS-only local iteration.
+    WARP_BIN_NAME="warp-oss"
+    WARP_CHANNEL="oss"
+else
+    ./script/install_channel_config || echo "Skipping internal channel config installation (no repo access)."
+
+    # If warp_channel_config is on PATH, build the Local channel binary; otherwise build the OSS channel.
+    if command -v warp-channel-config &>/dev/null; then
+        WARP_BIN_NAME="warp"
+        WARP_CHANNEL="local"
+    else
+        WARP_BIN_NAME="warp-oss"
+        WARP_CHANNEL="oss"
+    fi
+fi
 
 # These cargo features were removed and replaced by environment variables read
 # by warp-channel-config. Intercept them here so that existing --features

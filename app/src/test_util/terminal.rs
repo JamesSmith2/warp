@@ -15,6 +15,7 @@ use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::ai::skills::SkillManager;
 use crate::code_review::git_status_update::GitStatusUpdateModel;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+use crate::terminal::cli_agent_sessions::claude_rate_limits::ClaudeRateLimitUsageModel;
 use crate::terminal::cli_agent_sessions::codex_rate_limits::CodexRateLimitUsageModel;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::warp_managed_paths_watcher::WarpManagedPathsWatcher;
@@ -134,6 +135,8 @@ pub fn initialize_app_for_terminal_view(app: &mut App) {
     app.add_singleton_model(SystemInfo::new);
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     app.add_singleton_model(CodexRateLimitUsageModel::new_for_test);
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    app.add_singleton_model(ClaudeRateLimitUsageModel::new_for_test);
 
     app.add_singleton_model(|_| RestoredAgentConversations::new(vec![]));
     app.add_singleton_model(OneTimeModalModel::new);

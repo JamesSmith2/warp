@@ -92,10 +92,10 @@ impl CLIAgentSessionHandler for DefaultSessionListener {
 /// into CLI agent events.
 ///
 /// Codex sends notifications via OSC 9 (`\x1b]9;message\x07`) with
-/// human-readable text. Since there's no way to distinguish notification types
-/// from the raw text, all OSC 9 notifications are treated as `Stop` (success).
-/// The notification body becomes the event's `query` so it surfaces as the
-/// notification title in the UI.
+/// human-readable text. Most notifications are completion-style messages and
+/// are treated as `Stop` (success), but Codex also emits `Received.` when it
+/// accepts a prompt. That message marks the session as in-progress again so
+/// workspace activity reflects the active turn rather than the still-open TUI.
 struct CodexSessionHandler;
 
 impl CodexSessionHandler {
@@ -107,15 +107,21 @@ impl CodexSessionHandler {
             return None;
         }
 
+        let event = match body {
+            "Received." | "Received" => CLIAgentEventType::PromptSubmit,
+            _ => CLIAgentEventType::Stop,
+        };
+        let query = matches!(event, CLIAgentEventType::Stop).then(|| body.to_owned());
+
         Some(CLIAgentEvent {
             v: 1,
             agent: CLIAgent::Codex,
-            event: CLIAgentEventType::Stop,
+            event,
             session_id: None,
             cwd: None,
             project: None,
             payload: CLIAgentEventPayload {
-                query: Some(body.to_owned()),
+                query,
                 ..Default::default()
             },
         })
@@ -199,11 +205,21 @@ mod tests {
     use crate::terminal::cli_agent_sessions::event::CLIAgentEventType;
 
     #[test]
-    fn codex_parses_any_text_as_stop() {
+    fn codex_parses_completion_text_as_stop() {
         let event = CodexSessionHandler::parse_osc9_text("Agent turn complete").unwrap();
         assert_eq!(event.event, CLIAgentEventType::Stop);
         assert_eq!(event.agent, CLIAgent::Codex);
         assert_eq!(event.payload.query.as_deref(), Some("Agent turn complete"));
+    }
+
+    #[test]
+    fn codex_received_text_becomes_prompt_submit() {
+        for body in ["Received.", "Received"] {
+            let event = CodexSessionHandler::parse_osc9_text(body).unwrap();
+            assert_eq!(event.event, CLIAgentEventType::PromptSubmit);
+            assert_eq!(event.agent, CLIAgent::Codex);
+            assert_eq!(event.payload.query, None);
+        }
     }
 
     #[test]
