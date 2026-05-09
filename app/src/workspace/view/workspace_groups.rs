@@ -109,12 +109,22 @@ enum AgentActivity {
     Waiting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonRichAgentActivityPolicy {
+    /// Used by summary counts where stale non-rich sessions should not inflate
+    /// the visible Working total indefinitely.
+    RequireRecentInProgressEvent,
+    /// Used by workspace-row spinners where the terminal command itself is the
+    /// liveness guard. This keeps one stale-but-still-running Codex pane from
+    /// being dropped when a different pane completes.
+    TrustRunningTerminalCommand,
+}
+
 /// Maximum time we trust an `InProgress` status for an agent that lacks a
 /// reliable completion event (notably Codex, which only emits a `Received.`
 /// OSC 9 at prompt submission and no matching turn-complete signal). After
-/// this window without a fresh in-progress event, the workspace activity
-/// indicators (per-group spinner and Working/Waiting summary) drop the
-/// session out of the working count to avoid a stuck animation.
+/// this window without a fresh in-progress event, summary counts drop the
+/// session out of the working count to avoid a stuck number.
 const NON_RICH_AGENT_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(180);
 
 impl Workspace {
@@ -1309,6 +1319,7 @@ impl Workspace {
                     has_rich_status,
                     terminal_is_running_cli_agent,
                     last_active_event_at,
+                    NonRichAgentActivityPolicy::RequireRecentInProgressEvent,
                 ),
             );
         }
@@ -1338,6 +1349,7 @@ impl Workspace {
                 session.listener.is_some() && agent_supports_rich_status(&session.agent),
                 terminal_is_running_cli_agent,
                 cli_sessions.last_active_event_at(terminal_view.id()),
+                NonRichAgentActivityPolicy::TrustRunningTerminalCommand,
             ) {
                 return Some(activity);
             }
@@ -1373,6 +1385,7 @@ impl Workspace {
         has_rich_status: bool,
         terminal_is_running_cli_agent: bool,
         last_active_event_at: Option<Instant>,
+        non_rich_policy: NonRichAgentActivityPolicy,
     ) -> Option<AgentActivity> {
         if has_rich_status {
             return Self::cli_agent_activity_from_status(status);
@@ -1382,9 +1395,12 @@ impl Workspace {
             return None;
         }
 
-        last_active_event_at
-            .is_some_and(|t| t.elapsed() < NON_RICH_AGENT_ACTIVITY_TIMEOUT)
-            .then_some(AgentActivity::Working)
+        match non_rich_policy {
+            NonRichAgentActivityPolicy::RequireRecentInProgressEvent => last_active_event_at
+                .is_some_and(|t| t.elapsed() < NON_RICH_AGENT_ACTIVITY_TIMEOUT)
+                .then_some(AgentActivity::Working),
+            NonRichAgentActivityPolicy::TrustRunningTerminalCommand => Some(AgentActivity::Working),
+        }
     }
 
     fn workspace_terminal_view_is_running_cli_agent(
@@ -1720,6 +1736,82 @@ mod tests {
 
         assert_eq!(stats.working, 1);
         assert_eq!(stats.waiting, 0);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_drops_stale_non_rich_in_progress_sessions() {
+        let terminal_view_id = EntityId::new();
+        let stale_event_at = Instant::now()
+            .checked_sub(NON_RICH_AGENT_ACTIVITY_TIMEOUT + Duration::from_secs(1))
+            .unwrap();
+        let cli_sessions = [(
+            terminal_view_id,
+            CLIAgentSessionStatus::InProgress,
+            false,
+            true,
+        )];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            cli_sessions.iter().map(
+                |(terminal_view_id, status, has_rich_status, terminal_is_long_running)| {
+                    (
+                        *terminal_view_id,
+                        status,
+                        *has_rich_status,
+                        *terminal_is_long_running,
+                        Some(stale_event_at),
+                    )
+                },
+            ),
+            |_| None,
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 0);
+        assert_eq!(stats.waiting, 0);
+    }
+
+    #[test]
+    fn workspace_row_activity_trusts_running_non_rich_terminal_command() {
+        let stale_event_at = Instant::now()
+            .checked_sub(NON_RICH_AGENT_ACTIVITY_TIMEOUT + Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(
+            Workspace::cli_agent_session_activity(
+                &CLIAgentSessionStatus::InProgress,
+                false,
+                true,
+                Some(stale_event_at),
+                NonRichAgentActivityPolicy::TrustRunningTerminalCommand,
+            ),
+            Some(AgentActivity::Working)
+        );
+        assert_eq!(
+            Workspace::cli_agent_session_activity(
+                &CLIAgentSessionStatus::InProgress,
+                false,
+                true,
+                Some(stale_event_at),
+                NonRichAgentActivityPolicy::RequireRecentInProgressEvent,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_row_activity_does_not_trust_completed_non_rich_session() {
+        assert_eq!(
+            Workspace::cli_agent_session_activity(
+                &CLIAgentSessionStatus::Success,
+                false,
+                true,
+                Some(Instant::now()),
+                NonRichAgentActivityPolicy::TrustRunningTerminalCommand,
+            ),
+            None
+        );
     }
 
     #[test]
