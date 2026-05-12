@@ -87,10 +87,8 @@ impl TaskStatusSyncModel {
                 conversation_id,
                 is_restored,
                 ..
-            } => {
-                if !*is_restored {
-                    self.on_conversation_status_updated(*conversation_id, ctx);
-                }
+            } if !*is_restored => {
+                self.on_conversation_status_updated(*conversation_id, ctx);
             }
             // When the server token (and thus task_id) is first assigned to a
             // conversation, report its current status. This handles the race
@@ -172,7 +170,9 @@ impl TaskStatusSyncModel {
             return;
         };
 
-        let (task_state, status_message) = map_cli_session_status(status);
+        let Some((task_state, status_message)) = map_cli_session_status(status) else {
+            return;
+        };
         self.fire_update(task_id, task_state, status_message, ctx);
     }
 
@@ -313,14 +313,15 @@ pub(crate) fn classify_renderable_error(
 /// Maps a `CLIAgentSessionStatus` to an `AgentTaskState` and optional status message.
 fn map_cli_session_status(
     status: &CLIAgentSessionStatus,
-) -> (AgentTaskState, Option<TaskStatusUpdate>) {
+) -> Option<(AgentTaskState, Option<TaskStatusUpdate>)> {
     match status {
-        CLIAgentSessionStatus::InProgress => (AgentTaskState::InProgress, None),
-        CLIAgentSessionStatus::Success => (AgentTaskState::Succeeded, None),
-        CLIAgentSessionStatus::Blocked { message } => (
+        CLIAgentSessionStatus::Idle => None,
+        CLIAgentSessionStatus::InProgress => Some((AgentTaskState::InProgress, None)),
+        CLIAgentSessionStatus::Success => Some((AgentTaskState::Succeeded, None)),
+        CLIAgentSessionStatus::Blocked { message } => Some((
             AgentTaskState::Blocked,
             message.as_ref().map(TaskStatusUpdate::message),
-        ),
+        )),
     }
 }
 

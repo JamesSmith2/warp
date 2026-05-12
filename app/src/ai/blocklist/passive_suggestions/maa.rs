@@ -614,10 +614,8 @@ async fn extract_suggestion_from_stream(
             continue;
         };
         match response_event.r#type {
-            Some(api::response_event::Type::Init(init)) => {
-                if !init.request_id.is_empty() {
-                    server_request_token = Some(init.request_id);
-                }
+            Some(api::response_event::Type::Init(init)) if !init.request_id.is_empty() => {
+                server_request_token = Some(init.request_id);
             }
             Some(api::response_event::Type::ClientActions(actions)) => {
                 client_actions.extend(actions.actions);

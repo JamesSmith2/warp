@@ -122,11 +122,7 @@ impl EnvVarCommandDialog {
             Event::Navigate(NavigationKey::Tab) | Event::Navigate(NavigationKey::ShiftTab) => {
                 ctx.focus(&self.command_editor)
             }
-            Event::Enter => {
-                if !self.should_disable_save(ctx) {
-                    self.save_command_and_close(ctx)
-                }
-            }
+            Event::Enter if !self.should_disable_save(ctx) => self.save_command_and_close(ctx),
             Event::Escape => self.close(ctx),
             _ => {}
         }
@@ -137,11 +133,7 @@ impl EnvVarCommandDialog {
             Event::Navigate(NavigationKey::Tab) | Event::Navigate(NavigationKey::ShiftTab) => {
                 ctx.focus(&self.name_editor)
             }
-            Event::Enter => {
-                if !self.should_disable_save(ctx) {
-                    self.save_command_and_close(ctx)
-                }
-            }
+            Event::Enter if !self.should_disable_save(ctx) => self.save_command_and_close(ctx),
             Event::Escape => self.close(ctx),
             Event::Edited(_) => ctx.notify(),
             _ => {}

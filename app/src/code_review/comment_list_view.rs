@@ -496,10 +496,10 @@ impl CommentListView {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
-            EditorViewEvent::TextSelectionChanged => {
-                if view.as_ref(ctx).selected_text(ctx).is_some() {
-                    self.clear_other_comment_selections(Some(view.id()), ctx);
-                }
+            EditorViewEvent::TextSelectionChanged
+                if view.as_ref(ctx).selected_text(ctx).is_some() =>
+            {
+                self.clear_other_comment_selections(Some(view.id()), ctx);
             }
             EditorViewEvent::Focused => {
                 self.clear_other_comment_selections(Some(view.id()), ctx);
@@ -515,10 +515,8 @@ impl CommentListView {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
-            CodeEditorEvent::SelectionChanged => {
-                if view.as_ref(ctx).selected_text(ctx).is_some() {
-                    self.clear_other_comment_selections(Some(view.id()), ctx);
-                }
+            CodeEditorEvent::SelectionChanged if view.as_ref(ctx).selected_text(ctx).is_some() => {
+                self.clear_other_comment_selections(Some(view.id()), ctx);
             }
             CodeEditorEvent::Focused => {
                 self.clear_other_comment_selections(Some(view.id()), ctx);

@@ -3191,9 +3191,12 @@ impl Buffer {
         let line = self.line(point.row).ok()?;
         // Once we find word-characters, assign this to Some.
         let mut word_found_at: Option<CharOffset> = None;
-        // This is the loop counter, which is incremented manually.
-        let mut word_char_search_offset = CharOffset::from(point.column as usize);
-        for c in line.chars_at(word_char_search_offset).ok()? {
+        for (offset_delta, c) in line
+            .chars_at(CharOffset::from(point.column as usize))
+            .ok()?
+            .enumerate()
+        {
+            let word_char_search_offset = CharOffset::from(point.column as usize + offset_delta);
             // If no words exist from this point to the end of the line, then there is nothing to
             // return.
             if c == '\n' {
@@ -3203,7 +3206,6 @@ impl Buffer {
                 word_found_at = Some(word_char_search_offset);
                 break;
             }
-            word_char_search_offset += 1;
         }
 
         let word_start = line

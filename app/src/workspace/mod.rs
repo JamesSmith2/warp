@@ -1,6 +1,7 @@
 mod action;
 mod active_session;
 pub mod bonus_grant_notification_model;
+mod clear_workspaces_confirmation_dialog;
 #[cfg(target_os = "macos")]
 mod cli_install;
 mod close_session_confirmation_dialog;
@@ -108,6 +109,7 @@ pub fn init(app: &mut AppContext) {
 
     modal::init(app);
     native_modal::init(app);
+    clear_workspaces_confirmation_dialog::init(app);
     close_workspace_group_confirmation_dialog::init(app);
     lightbox_view::init(app);
     rewind_confirmation_dialog::init(app);

@@ -1855,8 +1855,8 @@ impl AgentConversationsModel {
             });
 
         // Sort each by updated_at (newest first), truncate
-        personal.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at));
-        team.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at));
+        personal.sort_by_key(|b| std::cmp::Reverse(b.1.updated_at));
+        team.sort_by_key(|b| std::cmp::Reverse(b.1.updated_at));
         personal.truncate(MAX_PERSONAL_TASKS);
         team.truncate(MAX_TEAM_TASKS);
 

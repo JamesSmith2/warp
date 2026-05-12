@@ -536,28 +536,28 @@ impl UpdateEnvironmentForm {
             | crate::editor::Event::AltEnter => {
                 me.handle_action(&UpdateEnvironmentFormAction::AddRepo, ctx);
             }
-            crate::editor::Event::BackspaceOnEmptyBuffer => {
-                if !me.form_state.selected_repos.is_empty() {
-                    let last_index = me.form_state.selected_repos.len() - 1;
-                    me.form_state.selected_repos.pop();
-                    if last_index < me.remove_repo_mouse_states.len() {
-                        me.remove_repo_mouse_states.pop();
-                    }
-                    if me.is_edit_mode() {
-                        me.edit_repos_modified = true;
-                    }
-                    ctx.notify();
+            crate::editor::Event::BackspaceOnEmptyBuffer
+                if !me.form_state.selected_repos.is_empty() =>
+            {
+                let last_index = me.form_state.selected_repos.len() - 1;
+                me.form_state.selected_repos.pop();
+                if last_index < me.remove_repo_mouse_states.len() {
+                    me.remove_repo_mouse_states.pop();
                 }
+                if me.is_edit_mode() {
+                    me.edit_repos_modified = true;
+                }
+                ctx.notify();
             }
-            crate::editor::Event::Navigate(NavigationKey::Down) => {
-                if me.github_dropdown_state.is_expanded {
-                    me.move_repo_dropdown_selection(RepoDropdownSelectionDirection::Down, ctx);
-                }
+            crate::editor::Event::Navigate(NavigationKey::Down)
+                if me.github_dropdown_state.is_expanded =>
+            {
+                me.move_repo_dropdown_selection(RepoDropdownSelectionDirection::Down, ctx);
             }
-            crate::editor::Event::Navigate(NavigationKey::Up) => {
-                if me.github_dropdown_state.is_expanded {
-                    me.move_repo_dropdown_selection(RepoDropdownSelectionDirection::Up, ctx);
-                }
+            crate::editor::Event::Navigate(NavigationKey::Up)
+                if me.github_dropdown_state.is_expanded =>
+            {
+                me.move_repo_dropdown_selection(RepoDropdownSelectionDirection::Up, ctx);
             }
             crate::editor::Event::Navigate(NavigationKey::Tab) => {
                 ctx.focus(&me.docker_image_editor);

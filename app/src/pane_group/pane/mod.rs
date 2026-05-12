@@ -29,11 +29,14 @@ pub mod view;
 pub(super) mod welcome_pane;
 pub(crate) mod welcome_view;
 pub mod workflow_pane;
+pub(super) mod workspace_layout_chooser_pane;
+pub(crate) mod workspace_layout_chooser_view;
 
 use std::{any::Any, fmt::Display};
 
 use crate::pane_group::focus_state::PaneFocusHandle;
 use crate::pane_group::pane::get_started_view::GetStartedView;
+use crate::pane_group::pane::workspace_layout_chooser_view::WorkspaceLayoutChooserView;
 use crate::view_components::action_button::ActionButton;
 use crate::{
     ai::execution_profiles::editor::ExecutionProfileEditorView,
@@ -151,6 +154,7 @@ pub(crate) enum IPaneType {
     GetStarted,
     NetworkLog,
     Welcome,
+    WorkspaceLayoutChooser,
     DeferredPlaceholder,
     /// A pane type only for tests.
     #[cfg(test)]
@@ -175,6 +179,7 @@ impl Display for IPaneType {
             IPaneType::GetStarted => write!(f, "GetStarted"),
             IPaneType::NetworkLog => write!(f, "Network Log"),
             IPaneType::Welcome => write!(f, "Welcome"),
+            IPaneType::WorkspaceLayoutChooser => write!(f, "Workspace Layout Chooser"),
             IPaneType::DeferredPlaceholder => write!(f, "Placeholder"),
             #[cfg(test)]
             IPaneType::Dummy => write!(f, "Dummy"),
@@ -269,6 +274,12 @@ impl PaneId {
 
     pub fn from_get_started_pane_ctx(ctx: &ViewContext<PaneView<GetStartedView>>) -> Self {
         Self::new_from_ctx(IPaneType::GetStarted, ctx)
+    }
+
+    pub fn from_workspace_layout_chooser_pane_ctx(
+        ctx: &ViewContext<PaneView<WorkspaceLayoutChooserView>>,
+    ) -> Self {
+        Self::new_from_ctx(IPaneType::WorkspaceLayoutChooser, ctx)
     }
 
     /// Creates a [`PaneId`] from a [`ViewContext<PaneView<NetworkLogView>>`].
@@ -368,6 +379,15 @@ impl PaneId {
 
     pub fn from_welcome_pane_view(welcome_pane_view: &ViewHandle<PaneView<WelcomeView>>) -> Self {
         Self::new(IPaneType::Welcome, welcome_pane_view)
+    }
+
+    pub fn from_workspace_layout_chooser_pane_view(
+        workspace_layout_chooser_pane_view: &ViewHandle<PaneView<WorkspaceLayoutChooserView>>,
+    ) -> Self {
+        Self::new(
+            IPaneType::WorkspaceLayoutChooser,
+            workspace_layout_chooser_pane_view,
+        )
     }
 
     /// Creates a [`PaneId`] from a [`PaneView<NetworkLogView>`] entity ID.
@@ -494,6 +514,10 @@ impl PaneId {
             }
             IPaneType::Welcome => {
                 ChildView::<PaneView<WelcomeView>>::with_id(self.0.pane_view_id).finish()
+            }
+            IPaneType::WorkspaceLayoutChooser => {
+                ChildView::<PaneView<WorkspaceLayoutChooserView>>::with_id(self.0.pane_view_id)
+                    .finish()
             }
             IPaneType::DeferredPlaceholder => warpui::elements::Empty::new().finish(),
             #[cfg(test)]

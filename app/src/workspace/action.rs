@@ -14,7 +14,7 @@ use crate::auth::auth_manager::LoginGatedFeature;
 use crate::drive::items::WarpDriveItemId;
 use crate::drive::CloudObjectTypeAndId;
 use crate::palette::PaletteMode;
-use crate::pane_group::PaneGroup;
+use crate::pane_group::{PaneGroup, TerminalLayoutAgentMode, TerminalLayoutPreset};
 use crate::prompt::editor_modal::OpenSource as PromptEditorOpenSource;
 use crate::search;
 use crate::server::ids::SyncId;
@@ -106,6 +106,11 @@ pub enum WorkspaceAction {
     AddWorkspaceGroup,
     CloseWorkspaceGroup(usize),
     RenameWorkspaceGroup(usize),
+    OpenWorkspaceGroupTerminalLayoutChooser(usize),
+    ApplyTerminalLayoutToActiveWorkspaceGroup {
+        preset: TerminalLayoutPreset,
+        agent_mode: TerminalLayoutAgentMode,
+    },
     SetWorkspaceGroupName {
         index: usize,
         name: String,
@@ -128,6 +133,7 @@ pub enum WorkspaceAction {
         position: RectF,
     },
     DropWorkspaceGroup,
+    ClearWorkspaces,
     ExportWorkspaces,
     ImportWorkspaces,
     ImportWorkspacesFromFile(PathBuf),
@@ -738,6 +744,7 @@ impl WorkspaceAction {
             | ActivateWorkspaceGroup(_)
             | AddWorkspaceGroup
             | CloseWorkspaceGroup(_)
+            | ClearWorkspaces
             | SetWorkspaceGroupName { .. }
             | SetWorkspaceGroupColor { .. }
             | CyclePrevSession
@@ -967,6 +974,8 @@ impl WorkspaceAction {
             | OpenSettingsFile
             | FixSettingsWithOz { .. }
             | RenameWorkspaceGroup(_)
+            | OpenWorkspaceGroupTerminalLayoutChooser(_)
+            | ApplyTerminalLayoutToActiveWorkspaceGroup { .. }
             | ToggleWorkspaceGroupContextMenu { .. }
             | ToggleWorkspaceGroupColorMenu { .. }
             | StartWorkspaceGroupDrag(_)

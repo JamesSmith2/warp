@@ -410,84 +410,80 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                 AIAgentActionType::ReadFiles(ReadFilesRequest { locations: files }),
                             id,
                             ..
-                        }) => {
-                            if !status.is_streaming() || !files.is_empty() {
-                                // get the results of the agent's read file actions so we can read the results for later use
-                                let agent_action_results = props
-                                    .action_model
-                                    .as_ref(app)
-                                    .get_action_result(id)
-                                    .map(|action_result| action_result.as_ref());
+                        }) if (!status.is_streaming() || !files.is_empty()) => {
+                            // get the results of the agent's read file actions so we can read the results for later use
+                            let agent_action_results = props
+                                .action_model
+                                .as_ref(app)
+                                .get_action_result(id)
+                                .map(|action_result| action_result.as_ref());
 
-                                // checks if the read file action result is completed and successful.
-                                // if successful, we have FileContext with pre-computed line counts that we use to clamp displayed file ranges to the length of the file
-                                let file_names = match agent_action_results {
-                                    // if completed and successful, generate a user message with file info + line count
-                                    Some(AIAgentActionResult {
-                                        result:
-                                            AIAgentActionResultType::ReadFiles(
-                                                ReadFilesResult::Success {
-                                                    files: file_contexts,
-                                                },
-                                            ),
-                                        ..
-                                    }) => {
-                                        if file_contexts.is_empty() {
-                                            // Empty file contexts — render as a failed
-                                            // action so the user sees the error instead
-                                            // of an empty box.
-                                            let formatted_text = render_requested_action_body_text(
-                                                "Failed to read files".into(),
-                                                appearance.ui_font_family(),
+                            // checks if the read file action result is completed and successful.
+                            // if successful, we have FileContext with pre-computed line counts that we use to clamp displayed file ranges to the length of the file
+                            let file_names = match agent_action_results {
+                                // if completed and successful, generate a user message with file info + line count
+                                Some(AIAgentActionResult {
+                                    result:
+                                        AIAgentActionResultType::ReadFiles(ReadFilesResult::Success {
+                                            files: file_contexts,
+                                        }),
+                                    ..
+                                }) => {
+                                    if file_contexts.is_empty() {
+                                        // Empty file contexts — render as a failed
+                                        // action so the user sees the error instead
+                                        // of an empty box.
+                                        let formatted_text = render_requested_action_body_text(
+                                            "Failed to read files".into(),
+                                            appearance.ui_font_family(),
+                                            app,
+                                        );
+                                        let renderable_action =
+                                            RenderableAction::new_with_formatted_text(
+                                                formatted_text,
                                                 app,
+                                            )
+                                            .with_icon(
+                                                inline_action_icons::red_x_icon(appearance)
+                                                    .finish(),
                                             );
-                                            let renderable_action =
-                                                RenderableAction::new_with_formatted_text(
-                                                    formatted_text,
-                                                    app,
-                                                )
-                                                .with_icon(
-                                                    inline_action_icons::red_x_icon(appearance)
-                                                        .finish(),
-                                                );
-                                            output_items
-                                                .add_child(renderable_action.render(app).finish());
-                                            continue;
-                                        }
-                                        group_file_contexts_for_display(
-                                            file_contexts,
+                                        output_items
+                                            .add_child(renderable_action.render(app).finish());
+                                        continue;
+                                    }
+                                    group_file_contexts_for_display(
+                                        file_contexts,
+                                        props.shell_launch_data,
+                                        props.current_working_directory,
+                                    )
+                                }
+                                // if not completed/successful, generate a user message without line count
+                                _ => files
+                                    .iter()
+                                    .map(|file| {
+                                        file.to_user_message(
                                             props.shell_launch_data,
                                             props.current_working_directory,
+                                            None,
                                         )
-                                    }
-                                    // if not completed/successful, generate a user message without line count
-                                    _ => files
-                                        .iter()
-                                        .map(|file| {
-                                            file.to_user_message(
-                                                props.shell_launch_data,
-                                                props.current_working_directory,
-                                                None,
-                                            )
-                                        })
-                                        .collect_vec(),
-                                };
+                                    })
+                                    .collect_vec(),
+                            };
 
-                                let file_paths: Vec<_> = files.iter().map(|f| &f.name).collect();
-                                let skill = common_path(&file_paths)
-                                    .and_then(|common| skill_path_from_file_path(&common))
-                                    .and_then(|skill_path| {
-                                        SkillManager::as_ref(app).skill_by_path(&skill_path)
-                                    });
-                                output_items.add_child(render_read_files(
-                                    props,
-                                    id,
-                                    file_names.iter(),
-                                    app,
-                                    skill,
-                                    action_index,
-                                ));
-                            }
+                            let file_paths: Vec<_> = files.iter().map(|f| &f.name).collect();
+                            let skill = common_path(&file_paths)
+                                .and_then(|common| skill_path_from_file_path(&common))
+                                .and_then(|skill_path| {
+                                    SkillManager::as_ref(app).skill_by_path(&skill_path)
+                                });
+                            output_items.add_child(render_read_files(
+                                props,
+                                id,
+                                file_names.iter(),
+                                app,
+                                skill,
+                                action_index,
+                            ));
                         }
                         AIAgentOutputMessageType::Action(AIAgentAction {
                             action: AIAgentActionType::RequestFileEdits { .. },
@@ -876,16 +872,13 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                 ),
                             );
                         }
-                        AIAgentOutputMessageType::DebugOutput { text } => {
-                            if ChannelState::enable_debug_features() {
-                                if let Some(element) = render_collapsible_debug_output(
-                                    output_message,
-                                    text,
-                                    props,
-                                    app,
-                                ) {
-                                    output_items.add_child(element);
-                                }
+                        AIAgentOutputMessageType::DebugOutput { text }
+                            if ChannelState::enable_debug_features() =>
+                        {
+                            if let Some(element) =
+                                render_collapsible_debug_output(output_message, text, props, app)
+                            {
+                                output_items.add_child(element);
                             }
                         }
                         AIAgentOutputMessageType::Subagent(SubagentCall {

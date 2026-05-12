@@ -1,24 +1,25 @@
 //! Local rate-limit tracker for the Claude Code CLI.
 //!
-//! Claude Code does not expose an `account/rateLimits/read`-style RPC, so we
-//! reconstruct usage from the transcript JSONL files Claude itself writes
-//! under `$CLAUDE_CONFIG_DIR/projects/**/*.jsonl`. Each assistant entry in
-//! those transcripts carries a `message.usage` block with token counts; we
-//! sum the relevant counts into two rolling windows (5h "primary" and 7d
-//! "secondary") and surface them via the same shape as
-//! [`super::codex_rate_limits`] so the workspace resource panel can render
-//! them through a shared helper.
+//! Claude Code does not expose an `account/rateLimits/read`-style RPC. When
+//! Claude's status line is visible, we parse the same provider-side 5h / 7d
+//! percentages that Claude Code renders there. The transcript sampler below is
+//! retained as a best-effort model source, but UI should prefer the status-line
+//! parser because transcript token totals are only approximations.
 //!
-//! The percentage figures are approximations: Anthropic does not publish a
-//! token-based cap and the actual server-side rate limit accounts for cost
-//! across models. We hardcode plan caps that are roughly representative of
-//! the Max5 plan today; a future pass should make this configurable.
+//! The transcript-derived percentage figures are approximations: Anthropic does
+//! not publish a token-based cap and the actual server-side rate limit accounts
+//! for cost across models. We hardcode plan caps that are roughly representative
+//! of the Max5 plan today; a future pass should make this configurable if the
+//! transcript sampler is used by another surface.
 
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::LazyLock;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
+use instant::Instant;
+use regex::Regex;
 use serde::Deserialize;
 use warpui::{r#async::Timer, Entity, ModelContext, SingletonEntity};
 
@@ -31,6 +32,12 @@ const PRIMARY_WINDOW: chrono::Duration = chrono::Duration::hours(5);
 const SECONDARY_WINDOW: chrono::Duration = chrono::Duration::days(7);
 const PRIMARY_WINDOW_MINS: u32 = 300;
 const SECONDARY_WINDOW_MINS: u32 = 7 * 24 * 60;
+const CLAUDE_STATUS_LINE_SCAN_LINES: usize = 24;
+
+static CLAUDE_STATUS_LINE_RATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?P<kind>5h|7d)\s+(?P<used>\d+(?:\.\d+)?)%")
+        .expect("Claude status line rate-limit regex must compile")
+});
 
 // TODO(claude-rate-limits): make these configurable per plan tier (Pro / Max5
 // / Max20). For now we default to a Max5-shaped cap.
@@ -103,19 +110,6 @@ impl ClaudeRateLimitUsageModel {
         }
     }
 
-    pub fn usage(&self) -> ClaudeRateLimitUsage {
-        let now = Utc::now();
-        let is_stale = self.current.as_ref().is_some_and(|sample| {
-            now.signed_duration_since(sample.fetched_at) > chrono::Duration::minutes(5)
-        });
-
-        ClaudeRateLimitUsage {
-            current: self.current.clone(),
-            last_error: self.last_error.clone(),
-            is_stale,
-        }
-    }
-
     pub fn request_refresh(&mut self, ctx: &mut ModelContext<Self>) {
         if self.refresh_in_flight {
             return;
@@ -166,6 +160,63 @@ impl Entity for ClaudeRateLimitUsageModel {
 }
 
 impl SingletonEntity for ClaudeRateLimitUsageModel {}
+
+pub(crate) fn parse_claude_status_line_usage(
+    output: &str,
+    now: DateTime<Utc>,
+) -> Option<ClaudeRateLimitUsageSample> {
+    let mut primary = None;
+    let mut secondary = None;
+
+    for line in output.lines().rev().take(CLAUDE_STATUS_LINE_SCAN_LINES) {
+        let line = strip_ansi_escapes(line);
+        for captures in CLAUDE_STATUS_LINE_RATE_RE.captures_iter(&line) {
+            let Some(kind) = captures.name("kind").map(|m| m.as_str()) else {
+                continue;
+            };
+            let Some(used_percent) = captures
+                .name("used")
+                .and_then(|m| m.as_str().parse::<f32>().ok())
+            else {
+                continue;
+            };
+            let countdown = captures
+                .get(0)
+                .and_then(|m| line.get(m.end()..))
+                .and_then(parse_status_line_countdown);
+
+            match kind {
+                "5h" if primary.is_none() => {
+                    primary = Some(build_status_line_window(
+                        ClaudeRateLimitWindowKind::Primary,
+                        used_percent,
+                        countdown,
+                        now,
+                    ));
+                }
+                "7d" if secondary.is_none() => {
+                    secondary = Some(build_status_line_window(
+                        ClaudeRateLimitWindowKind::Secondary,
+                        used_percent,
+                        countdown,
+                        now,
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        if primary.is_some() && secondary.is_some() {
+            break;
+        }
+    }
+
+    (primary.is_some() || secondary.is_some()).then_some(ClaudeRateLimitUsageSample {
+        fetched_at: now,
+        primary,
+        secondary,
+    })
+}
 
 async fn fetch_claude_rate_limits() -> Result<ClaudeRateLimitUsageSample> {
     let config_root = claude_config_dir().context("could not resolve Claude config dir")?;
@@ -353,6 +404,93 @@ fn build_window(
     }
 }
 
+fn build_status_line_window(
+    kind: ClaudeRateLimitWindowKind,
+    used_percent: f32,
+    resets_after: Option<chrono::Duration>,
+    now: DateTime<Utc>,
+) -> ClaudeRateLimitWindowUsage {
+    let used_percent = used_percent.clamp(0., 100.);
+    let remaining_percent = (100. - used_percent).clamp(0., 100.);
+    let window_duration_mins = match kind {
+        ClaudeRateLimitWindowKind::Primary => PRIMARY_WINDOW_MINS,
+        ClaudeRateLimitWindowKind::Secondary => SECONDARY_WINDOW_MINS,
+    };
+
+    ClaudeRateLimitWindowUsage {
+        kind,
+        used_percent,
+        remaining_percent,
+        window_duration_mins: Some(window_duration_mins),
+        resets_at: resets_after.map(|duration| now + duration),
+    }
+}
+
+fn parse_status_line_countdown(input: &str) -> Option<chrono::Duration> {
+    let mut rest = input.trim_start();
+    if rest.starts_with("now") {
+        return Some(chrono::Duration::zero());
+    }
+
+    let mut total_minutes: i64 = 0;
+    let mut matched = false;
+
+    if let Some((hours, after_number)) = parse_leading_u32(rest) {
+        let after_number = after_number.trim_start();
+        if let Some(after_hours) = after_number.strip_prefix('h') {
+            total_minutes = total_minutes.saturating_add(i64::from(hours) * 60);
+            matched = true;
+            rest = after_hours;
+        }
+    }
+
+    rest = rest.trim_start();
+    if let Some((minutes, after_number)) = parse_leading_u32(rest) {
+        let after_number = after_number.trim_start();
+        if after_number.starts_with("min") {
+            total_minutes = total_minutes.saturating_add(i64::from(minutes));
+            matched = true;
+        }
+    }
+
+    matched.then_some(chrono::Duration::minutes(total_minutes))
+}
+
+fn parse_leading_u32(input: &str) -> Option<(u32, &str)> {
+    let digit_end = input
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_ascii_digit()).then_some(index))
+        .unwrap_or(input.len());
+    if digit_end == 0 {
+        return None;
+    }
+
+    let value = input[..digit_end].parse().ok()?;
+    Some((value, &input[digit_end..]))
+}
+
+fn strip_ansi_escapes(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            output.push(ch);
+            continue;
+        }
+
+        if chars.next_if_eq(&'[').is_some() {
+            for ch in chars.by_ref() {
+                if ('@'..='~').contains(&ch) {
+                    break;
+                }
+            }
+        }
+    }
+
+    output
+}
+
 #[derive(Debug, Deserialize)]
 struct TranscriptEntry {
     #[serde(default)]
@@ -514,5 +652,80 @@ mod tests {
         assert_eq!(window.used_percent, 100.);
         assert_eq!(window.remaining_percent, 0.);
         assert_eq!(window.resets_at, Some(oldest + PRIMARY_WINDOW));
+    }
+
+    #[test]
+    fn parses_status_line_rate_limits_as_used_percentages() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 0).unwrap();
+        let output = "Opus 4.7 | mobile | ctx 99K/1M 10% | 5h 22% 2h 55min | 7d 15% 109h 5min";
+
+        let usage = parse_claude_status_line_usage(output, now).unwrap();
+        let primary = usage.primary.unwrap();
+        let secondary = usage.secondary.unwrap();
+
+        assert_eq!(usage.fetched_at, now);
+        assert_eq!(primary.kind, ClaudeRateLimitWindowKind::Primary);
+        assert_eq!(primary.used_percent, 22.);
+        assert_eq!(primary.remaining_percent, 78.);
+        assert_eq!(primary.window_duration_mins, Some(PRIMARY_WINDOW_MINS));
+        assert_eq!(
+            primary.resets_at,
+            Some(now + chrono::Duration::hours(2) + chrono::Duration::minutes(55))
+        );
+        assert_eq!(secondary.kind, ClaudeRateLimitWindowKind::Secondary);
+        assert_eq!(secondary.used_percent, 15.);
+        assert_eq!(secondary.remaining_percent, 85.);
+        assert_eq!(secondary.window_duration_mins, Some(SECONDARY_WINDOW_MINS));
+        assert_eq!(
+            secondary.resets_at,
+            Some(now + chrono::Duration::hours(109) + chrono::Duration::minutes(5))
+        );
+    }
+
+    #[test]
+    fn parses_status_line_limits_without_countdowns() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 0).unwrap();
+        let usage = parse_claude_status_line_usage("Claude | 5h 40% | 7d 25%", now).unwrap();
+
+        assert_eq!(usage.primary.unwrap().resets_at, None);
+        assert_eq!(usage.secondary.unwrap().resets_at, None);
+    }
+
+    #[test]
+    fn parses_status_line_countdown_now() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 0).unwrap();
+        let usage = parse_claude_status_line_usage("Claude | 5h 100% now", now).unwrap();
+
+        let primary = usage.primary.unwrap();
+        assert_eq!(primary.remaining_percent, 0.);
+        assert_eq!(primary.resets_at, Some(now));
+    }
+
+    #[test]
+    fn clamps_status_line_percentages() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 0).unwrap();
+        let usage = parse_claude_status_line_usage("Claude | 5h 120% | 7d 0%", now).unwrap();
+
+        assert_eq!(usage.primary.unwrap().remaining_percent, 0.);
+        assert_eq!(usage.secondary.unwrap().remaining_percent, 100.);
+    }
+
+    #[test]
+    fn status_line_parser_ignores_unrelated_output() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 0).unwrap();
+
+        assert_eq!(
+            parse_claude_status_line_usage("ctx 99K/1M 10%\nWorking on task", now),
+            None
+        );
+    }
+
+    #[test]
+    fn status_line_parser_handles_ansi_colored_output() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 0).unwrap();
+        let output = "\u{1b}[2m5h\u{1b}[0m \u{1b}[92m22%\u{1b}[0m 55min";
+
+        let usage = parse_claude_status_line_usage(output, now).unwrap();
+        assert_eq!(usage.primary.unwrap().remaining_percent, 78.);
     }
 }

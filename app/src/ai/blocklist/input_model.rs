@@ -201,22 +201,20 @@ impl BlocklistAIInputModel {
         ctx.subscribe_to_model(&AISettings::handle(ctx), move |me, event, ctx| {
             match event {
                 AISettingsChangedEvent::AIAutoDetectionEnabled { .. }
-                    if FeatureFlag::AgentView.is_enabled() =>
+                    if FeatureFlag::AgentView.is_enabled()
+                        && me.agent_view_controller.as_ref(ctx).is_fullscreen() =>
                 {
-                    if me.agent_view_controller.as_ref(ctx).is_fullscreen() {
-                        // Use context-specific check to determine if autodetection should be enabled
-                        let is_nld_enabled =
-                            AISettings::as_ref(ctx).is_ai_autodetection_enabled(ctx);
+                    // Use context-specific check to determine if autodetection should be enabled
+                    let is_nld_enabled = AISettings::as_ref(ctx).is_ai_autodetection_enabled(ctx);
 
-                        // If autodetection is enabled, unlock the input.
-                        me.set_input_config_internal(
-                            InputConfig {
-                                is_locked: !is_nld_enabled,
-                                input_type: InputType::AI,
-                            },
-                            ctx,
-                        );
-                    }
+                    // If autodetection is enabled, unlock the input.
+                    me.set_input_config_internal(
+                        InputConfig {
+                            is_locked: !is_nld_enabled,
+                            input_type: InputType::AI,
+                        },
+                        ctx,
+                    );
                 }
                 AISettingsChangedEvent::AIAutoDetectionEnabled { .. } => {
                     // Use context-specific check to determine if autodetection should be enabled
@@ -310,20 +308,18 @@ impl BlocklistAIInputModel {
                 AgentViewControllerEvent::ExitedAgentView {
                     is_exit_before_new_entrance,
                     ..
-                } => {
-                    if !is_exit_before_new_entrance {
-                        // When truly exiting agent view, use the terminal-specific NLD setting
-                        // since the user is returning to terminal mode.
-                        let is_nld_in_terminal_enabled =
-                            AISettings::as_ref(ctx).is_nld_in_terminal_enabled(ctx);
-                        me.set_input_config_internal(
-                            InputConfig {
-                                input_type: InputType::Shell,
-                                is_locked: !is_nld_in_terminal_enabled,
-                            },
-                            ctx,
-                        );
-                    }
+                } if !is_exit_before_new_entrance => {
+                    // When truly exiting agent view, use the terminal-specific NLD setting
+                    // since the user is returning to terminal mode.
+                    let is_nld_in_terminal_enabled =
+                        AISettings::as_ref(ctx).is_nld_in_terminal_enabled(ctx);
+                    me.set_input_config_internal(
+                        InputConfig {
+                            input_type: InputType::Shell,
+                            is_locked: !is_nld_in_terminal_enabled,
+                        },
+                        ctx,
+                    );
                 }
                 _ => (),
             });

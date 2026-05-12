@@ -1,3 +1,4 @@
+use crate::auth::AuthStateProvider;
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::report_error;
 use crate::server::{ids::ServerId, retry_strategies::LISTENER_RETRY_STRATEGY};
@@ -237,7 +238,7 @@ impl Listener {
                 // this handler just restarts the websocket so that `on_subscription_ready`
                 // can decide whether to refresh based on the sleep-time gap.
                 if self.should_subscribe_to_updates {
-                    self.get_warp_drive_updates(ctx);
+                    self.try_get_warp_drive_updates(ctx);
                 }
             }
             SystemStatsEvent::CpuWillSleep => {
@@ -264,7 +265,7 @@ impl Listener {
                     }
 
                     if self.should_subscribe_to_updates {
-                        self.get_warp_drive_updates(ctx);
+                        self.try_get_warp_drive_updates(ctx);
                     }
                 }
 
@@ -281,10 +282,18 @@ impl Listener {
     }
 
     fn start_listener(&mut self, ctx: &mut ModelContext<Self>) {
+        if !Self::is_logged_in(ctx) {
+            return;
+        }
+
         if !self.should_subscribe_to_updates {
             self.should_subscribe_to_updates = true;
-            self.get_warp_drive_updates(ctx);
+            self.try_get_warp_drive_updates(ctx);
         }
+    }
+
+    fn is_logged_in(ctx: &ModelContext<Self>) -> bool {
+        AuthStateProvider::as_ref(ctx).get().is_logged_in()
     }
 
     /// Cancels any pending delayed refresh that was scheduled after a reconnection.
@@ -409,7 +418,7 @@ impl Listener {
                         ctx.spawn(async move {
                             Timer::after(time_to_wait).await
                         }, |me, _, ctx| {
-                            me.get_warp_drive_updates(ctx);
+                            me.try_get_warp_drive_updates(ctx);
                         });
                     }
                     RequestState::RequestFailedRetryPending(e) => {
@@ -425,6 +434,12 @@ impl Listener {
         self.current_subscription_abort_handle = Some(spawn_handle.abort_handle());
     }
 
+    fn try_get_warp_drive_updates(&mut self, ctx: &mut ModelContext<Self>) {
+        if Self::is_logged_in(ctx) {
+            self.get_warp_drive_updates(ctx);
+        }
+    }
+
     #[allow(dead_code)]
     pub fn has_current_subscription_abort_handle(&self) -> bool {
         self.current_subscription_abort_handle.is_some()
@@ -436,3 +451,7 @@ impl Entity for Listener {
 }
 
 impl SingletonEntity for Listener {}
+
+#[cfg(test)]
+#[path = "listener_tests.rs"]
+mod tests;

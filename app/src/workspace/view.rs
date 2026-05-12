@@ -265,7 +265,7 @@ use crate::notebooks::manager::{NotebookManager, NotebookSource};
 use crate::pane_group::FilePane;
 use crate::pane_group::{
     self, AnyPaneContent, CodeDiffPane, CodePane, Direction, NewTerminalOptions, PanesLayout,
-    TabBarHoverIndex,
+    TabBarHoverIndex, TerminalLayoutAgentMode, TerminalLayoutPreset,
 };
 use crate::remote_server::manager::RemoteServerManager;
 #[cfg(feature = "local_fs")]
@@ -441,6 +441,9 @@ use super::action::{
 
 const WORKSPACE_GROUP_NOTIFICATION_FLASH_INTERVAL: Duration = Duration::from_millis(550);
 const WORKSPACE_GROUP_ACTIVITY_ANIMATION_INTERVAL: Duration = Duration::from_millis(125);
+use super::clear_workspaces_confirmation_dialog::{
+    ClearWorkspacesConfirmationDialog, ClearWorkspacesConfirmationEvent,
+};
 use super::close_session_confirmation_dialog::{
     CloseSessionConfirmationDialog, CloseSessionConfirmationEvent, OpenDialogSource,
 };
@@ -1010,6 +1013,7 @@ pub struct Workspace {
         Option<PendingSessionConfigTabConfigChipTutorial>,
     new_worktree_modal: ModalViewState<Modal<NewWorktreeModal>>,
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
+    clear_workspaces_confirmation_dialog: ViewHandle<ClearWorkspacesConfirmationDialog>,
     close_workspace_group_confirmation_dialog: ViewHandle<CloseWorkspaceGroupConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
@@ -1843,6 +1847,17 @@ impl Workspace {
         let dialog = ctx.add_typed_action_view(CloseWorkspaceGroupConfirmationDialog::new);
         ctx.subscribe_to_view(&dialog, move |me, _, event, ctx| {
             me.handle_close_workspace_group_confirmation_dialog_event(event, ctx);
+        });
+
+        dialog
+    }
+
+    fn build_clear_workspaces_confirmation_dialog(
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<ClearWorkspacesConfirmationDialog> {
+        let dialog = ctx.add_typed_action_view(ClearWorkspacesConfirmationDialog::new);
+        ctx.subscribe_to_view(&dialog, move |me, _, event, ctx| {
+            me.handle_clear_workspaces_confirmation_dialog_event(event, ctx);
         });
 
         dialog
@@ -3264,6 +3279,9 @@ impl Workspace {
             workspace_group_notification_flash_on: false,
             workspace_group_activity_animation_handle: None,
             workspace_group_activity_animation_frame: 0,
+            clear_workspaces_confirmation_dialog: Self::build_clear_workspaces_confirmation_dialog(
+                ctx,
+            ),
             close_workspace_group_confirmation_dialog:
                 Self::build_close_workspace_group_confirmation_dialog(ctx),
             new_session_dropdown_menu,
@@ -3929,7 +3947,6 @@ impl Workspace {
                         let pane_group = tab.pane_group.as_ref(app);
                         pane_group
                             .terminal_pane_ids()
-                            .into_iter()
                             .filter_map(|pane_id| {
                                 pane_group.terminal_view_from_pane_id(pane_id, app)
                             })
@@ -4433,7 +4450,7 @@ impl Workspace {
     }
 
     #[cfg(feature = "local_fs")]
-    fn export_workspaces(&mut self, ctx: &mut ViewContext<Self>) {
+    fn export_workspaces(&mut self, clear_after_export: bool, ctx: &mut ViewContext<Self>) {
         let app_state = self.current_app_state_for_workspace_export(ctx);
         let launch_config = LaunchConfig::from_snapshot("Workspaces".to_string(), &app_state);
         let Ok(yaml) = launch_config.to_yaml_string() else {
@@ -4449,7 +4466,16 @@ impl Workspace {
                 let path = PathBuf::from(path);
                 match std::fs::write(&path, &yaml) {
                     Ok(()) => {
-                        workspace.show_workspace_file_toast("Exported workspaces.", false, ctx)
+                        if clear_after_export {
+                            workspace.clear_all_workspace_windows(ctx);
+                            workspace.show_workspace_file_toast(
+                                "Exported and cleared workspaces.",
+                                false,
+                                ctx,
+                            );
+                        } else {
+                            workspace.show_workspace_file_toast("Exported workspaces.", false, ctx)
+                        }
                     }
                     Err(error) => {
                         log::warn!("Failed to export workspaces to {}: {error}", path.display());
@@ -4467,7 +4493,7 @@ impl Workspace {
     }
 
     #[cfg(not(feature = "local_fs"))]
-    fn export_workspaces(&mut self, ctx: &mut ViewContext<Self>) {
+    fn export_workspaces(&mut self, _clear_after_export: bool, ctx: &mut ViewContext<Self>) {
         self.show_workspace_file_toast("Workspace export is not available here.", true, ctx);
     }
 
@@ -5315,10 +5341,8 @@ impl Workspace {
                 ManagerEvent::StartedShare {
                     window_id,
                     session_id,
-                } => {
-                    if *window_id == ctx.window_id() {
-                        me.copy_shared_session_link(session_id, ctx);
-                    }
+                } if *window_id == ctx.window_id() => {
+                    me.copy_shared_session_link(session_id, ctx);
                 }
                 #[cfg(target_family = "wasm")]
                 ManagerEvent::JoinedSession { view_id, .. } => {
@@ -6078,8 +6102,78 @@ impl Workspace {
             false,
             ctx,
         );
+        self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+            pane_group.open_terminal_layout_chooser(ctx);
+        });
         self.set_active_tab_index(0, ctx);
         ctx.dispatch_global_action("workspace:save_app", ());
+        ctx.notify();
+    }
+
+    fn workspace_group_can_open_terminal_layout_chooser(
+        &self,
+        index: usize,
+        ctx: &AppContext,
+    ) -> bool {
+        let tabs = if index == self.active_workspace_group_index {
+            &self.tabs
+        } else {
+            match self.workspace_groups.get(index) {
+                Some(group) => &group.tabs,
+                None => return false,
+            }
+        };
+
+        let Some(tab) = tabs.iter().exactly_one().ok() else {
+            return false;
+        };
+
+        tab.pane_group.as_ref(ctx).is_single_visible_terminal_pane()
+    }
+
+    fn open_workspace_group_terminal_layout_chooser(
+        &mut self,
+        index: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.close_workspace_group_context_menu(ctx);
+        if !self.workspace_group_can_open_terminal_layout_chooser(index, ctx) {
+            return;
+        }
+
+        if index != self.active_workspace_group_index {
+            self.activate_workspace_group(index, ctx);
+        }
+
+        self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+            pane_group.open_terminal_layout_chooser(ctx);
+        });
+        ctx.dispatch_global_action("workspace:save_app", ());
+        ctx.notify();
+    }
+
+    fn apply_terminal_layout_to_active_workspace_group(
+        &mut self,
+        preset: TerminalLayoutPreset,
+        agent_mode: TerminalLayoutAgentMode,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let applied = self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+            pane_group.apply_terminal_layout_preset(preset, agent_mode, ctx)
+        });
+
+        if applied {
+            self.focus_active_tab(ctx);
+            ctx.dispatch_global_action("workspace:save_app", ());
+            ctx.notify();
+        }
+    }
+
+    fn open_clear_workspaces_confirmation_dialog(&mut self, ctx: &mut ViewContext<Self>) {
+        self.close_workspace_group_context_menu(ctx);
+        self.current_workspace_state
+            .is_clear_workspaces_confirmation_dialog_open = true;
+        ctx.focus(&self.clear_workspaces_confirmation_dialog);
         ctx.notify();
     }
 
@@ -6122,6 +6216,73 @@ impl Workspace {
         .min(self.workspace_groups.len().saturating_sub(1));
         self.load_workspace_group(next_index);
         self.set_active_tab_index(self.active_tab_index, ctx);
+        ctx.dispatch_global_action("workspace:save_app", ());
+        ctx.notify();
+    }
+
+    fn clear_all_workspace_windows(&mut self, ctx: &mut ViewContext<Self>) {
+        let current_window_id = ctx.window_id();
+        let quake_mode_id = quake_mode_window_id();
+        let other_workspaces = WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .filter(|(window_id, _)| *window_id != current_window_id)
+            .filter(|(window_id, _)| Some(*window_id) != quake_mode_id)
+            .filter(|(_, workspace)| {
+                !workspace.read(ctx, |workspace, _| workspace.is_tab_drag_preview())
+            })
+            .collect::<Vec<_>>();
+
+        for (_, workspace) in other_workspaces {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.clear_workspace_window(ctx);
+            });
+        }
+
+        if quake_mode_id != Some(current_window_id) && !self.is_tab_drag_preview() {
+            self.clear_workspace_window(ctx);
+        }
+    }
+
+    fn clear_workspace_window(&mut self, ctx: &mut ViewContext<Self>) {
+        self.close_workspace_group_context_menu(ctx);
+        self.current_workspace_state.clear_tab_being_renamed();
+        self.current_workspace_state
+            .clear_workspace_group_being_renamed();
+        self.current_workspace_state.clear_pane_being_renamed();
+
+        self.persist_active_workspace_group();
+        let working_directories_model = self.working_directories_model.clone();
+        for group in self.workspace_groups.drain(..) {
+            for tab in group.tabs {
+                tab.pane_group.update(ctx, |pane_group, ctx| {
+                    pane_group.detach_panes_for_close(&working_directories_model, ctx);
+                });
+            }
+        }
+        for tab in self.tabs.drain(..) {
+            tab.pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.detach_panes_for_close(&working_directories_model, ctx);
+            });
+        }
+
+        self.active_tab_index = 0;
+        self.active_workspace_group_index = 0;
+        self.workspace_groups.push(WorkspaceGroupData::new(
+            "Workspace 1".to_string(),
+            WorkspaceGroupSnapshot::default_color_for_index(0),
+        ));
+        self.add_new_session_tab_with_default_mode(
+            NewSessionSource::Window,
+            None,
+            None,
+            None,
+            false,
+            ctx,
+        );
+        self.set_active_tab_index(0, ctx);
+        self.focus_active_tab(ctx);
+        self.update_window_title(ctx);
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
@@ -7051,6 +7212,15 @@ impl Workspace {
         let mut items = vec![MenuItemFields::new("Rename")
             .with_on_select_action(WorkspaceAction::RenameWorkspaceGroup(index))
             .into_item()];
+        if self.workspace_group_can_open_terminal_layout_chooser(index, ctx) {
+            items.push(
+                MenuItemFields::new("Choose terminal layout...")
+                    .with_on_select_action(
+                        WorkspaceAction::OpenWorkspaceGroupTerminalLayoutChooser(index),
+                    )
+                    .into_item(),
+            );
+        }
         if self.workspace_groups.len() > 1 {
             items.push(MenuItem::Separator);
             items.push(
@@ -11263,6 +11433,29 @@ impl Workspace {
         }
     }
 
+    fn handle_clear_workspaces_confirmation_dialog_event(
+        &mut self,
+        event: &ClearWorkspacesConfirmationEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.current_workspace_state
+            .is_clear_workspaces_confirmation_dialog_open = false;
+        match event {
+            ClearWorkspacesConfirmationEvent::Cancel => {
+                ctx.notify();
+            }
+            ClearWorkspacesConfirmationEvent::ExportAndClear => {
+                self.export_workspaces(true, ctx);
+                ctx.notify();
+            }
+            ClearWorkspacesConfirmationEvent::ClearWithoutExport => {
+                self.clear_all_workspace_windows(ctx);
+                self.show_workspace_file_toast("Cleared workspaces.", false, ctx);
+                ctx.notify();
+            }
+        }
+    }
+
     fn handle_rewind_confirmation_dialog_event(
         &mut self,
         event: &RewindConfirmationEvent,
@@ -12200,6 +12393,21 @@ impl Workspace {
         ctx.notify();
     }
 
+    fn maybe_open_terminal_layout_chooser_for_new_tab(&mut self, ctx: &mut ViewContext<Self>) {
+        if !Self::workspace_groups_enabled(ctx) {
+            return;
+        }
+
+        self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+            pane_group.open_terminal_layout_chooser(ctx);
+        });
+    }
+
+    fn add_terminal_tab_with_layout_chooser(&mut self, ctx: &mut ViewContext<Self>) {
+        self.add_terminal_tab(false, ctx);
+        self.maybe_open_terminal_layout_chooser_for_new_tab(ctx);
+    }
+
     fn add_welcome_tab(&mut self, ctx: &mut ViewContext<Self>) {
         let startup_directory = self.get_new_tab_startup_directory(
             NewSessionSource::Tab,
@@ -12322,6 +12530,9 @@ impl Workspace {
             false,
             ctx,
         );
+        if source == AddTabWithShellSource::ShellSelectorMenu {
+            self.maybe_open_terminal_layout_chooser_for_new_tab(ctx);
+        }
         ctx.notify();
     }
 
@@ -14290,14 +14501,13 @@ impl Workspace {
                     }
                 }
             }
-            (_, Some(ChangelogRequestType::UserAction), _) => {
+            (_, Some(ChangelogRequestType::UserAction), _)
                 if !self.current_workspace_state.is_resource_center_open
-                    && !self.current_workspace_state.is_ai_assistant_panel_open
-                {
-                    self.open_resource_center_main_page(ctx);
-                    self.update_resource_center_action_target(ctx);
-                    ctx.notify();
-                }
+                    && !self.current_workspace_state.is_ai_assistant_panel_open =>
+            {
+                self.open_resource_center_main_page(ctx);
+                self.update_resource_center_action_target(ctx);
+                ctx.notify();
             }
             (false, _, Some(kind)) => {
                 // We shouldn't show the changelog modal, but we have a pending reward modal, so we
@@ -16613,12 +16823,12 @@ impl Workspace {
             WindowSettingsChangedEvent::BackgroundOpacity { .. } => {
                 ctx.notify();
             }
-            WindowSettingsChangedEvent::LeftPanelVisibilityAcrossTabs { .. } => {
-                if self.left_panel_visibility_across_tabs_enabled(ctx) {
-                    self.left_panel_open = self
-                        .active_tab_pane_group()
-                        .read(ctx, |pane_group, _| pane_group.left_panel_open);
-                }
+            WindowSettingsChangedEvent::LeftPanelVisibilityAcrossTabs { .. }
+                if self.left_panel_visibility_across_tabs_enabled(ctx) =>
+            {
+                self.left_panel_open = self
+                    .active_tab_pane_group()
+                    .read(ctx, |pane_group, _| pane_group.left_panel_open);
             }
             WindowSettingsChangedEvent::ZoomLevel { .. } => {
                 self.update_titlebar_height(ctx);
@@ -21423,6 +21633,12 @@ impl TypedActionView for Workspace {
             AddWorkspaceGroup => self.add_workspace_group(ctx),
             CloseWorkspaceGroup(index) => self.close_workspace_group(*index, ctx),
             RenameWorkspaceGroup(index) => self.rename_workspace_group(*index, ctx),
+            OpenWorkspaceGroupTerminalLayoutChooser(index) => {
+                self.open_workspace_group_terminal_layout_chooser(*index, ctx)
+            }
+            ApplyTerminalLayoutToActiveWorkspaceGroup { preset, agent_mode } => {
+                self.apply_terminal_layout_to_active_workspace_group(*preset, *agent_mode, ctx)
+            }
             SetWorkspaceGroupName { index, name } => {
                 self.set_workspace_group_name(*index, name, ctx)
             }
@@ -21448,7 +21664,8 @@ impl TypedActionView for Workspace {
                 self.current_workspace_state.is_tab_being_dragged = false;
                 ctx.notify();
             }
-            ExportWorkspaces => self.export_workspaces(ctx),
+            ClearWorkspaces => self.open_clear_workspaces_confirmation_dialog(ctx),
+            ExportWorkspaces => self.export_workspaces(false, ctx),
             ImportWorkspaces => self.import_workspaces(ctx),
             ImportWorkspacesFromFile(path) => self.import_workspaces_from_file(path, ctx),
             OpenLaunchConfigSaveModal => self.open_launch_config_save_modal(ctx),
@@ -21505,7 +21722,7 @@ impl TypedActionView for Workspace {
                                     .default_tab_config_path
                                     .set_value(String::new(), ctx));
                             });
-                            self.add_terminal_tab(false, ctx);
+                            self.add_terminal_tab_with_layout_chooser(ctx);
                         }
                     }
                     DefaultSessionMode::CloudAgent => {
@@ -21520,7 +21737,7 @@ impl TypedActionView for Workspace {
                         if FeatureFlag::WelcomeTab.is_enabled() {
                             self.add_welcome_tab(ctx);
                         } else {
-                            self.add_terminal_tab(false, ctx);
+                            self.add_terminal_tab_with_layout_chooser(ctx);
                         }
                     }
                 }
@@ -21535,6 +21752,9 @@ impl TypedActionView for Workspace {
                     DefaultSessionModeBehavior::Ignore,
                     ctx,
                 );
+                if !hide_homepage {
+                    self.maybe_open_terminal_layout_chooser_for_new_tab(ctx);
+                }
                 ctx.notify();
             }
             AddTabWithShell { shell, source } => {
@@ -23965,7 +24185,7 @@ impl View for Workspace {
 
         // Render the new session dropdown menu. This is outside the tab bar visibility
         // gate because it can also be opened from the vertical tabs panel.
-        if self.show_new_session_dropdown_menu.is_some() {
+        if let Some(new_session_menu_position) = self.show_new_session_dropdown_menu {
             let is_vertical = Self::vertical_tabs_enabled_without_workspace_groups(app)
                 && self.vertical_tabs_panel_open;
 
@@ -23985,7 +24205,6 @@ impl View for Workspace {
                 // TODO(CORE-2300): In the new version of the shell selector, this is not a
                 // context menu but a dropdown. Since it is quite wide, we need to reposition
                 // it so it does not render outside the bounds of the window.
-                let new_session_menu_position = self.show_new_session_dropdown_menu.unwrap();
                 let bounds = if FeatureFlag::ShellSelector.is_enabled() {
                     ParentOffsetBounds::WindowByPosition
                 } else {
@@ -24473,6 +24692,21 @@ impl View for Workspace {
         {
             stack.add_positioned_overlay_child(
                 ChildView::new(&self.close_workspace_group_confirmation_dialog).finish(),
+                OffsetPositioning::offset_from_parent(
+                    Vector2F::zero(),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::Center,
+                    ChildAnchor::Center,
+                ),
+            );
+        }
+
+        if self
+            .current_workspace_state
+            .is_clear_workspaces_confirmation_dialog_open
+        {
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.clear_workspaces_confirmation_dialog).finish(),
                 OffsetPositioning::offset_from_parent(
                     Vector2F::zero(),
                     ParentOffsetBounds::WindowByPosition,

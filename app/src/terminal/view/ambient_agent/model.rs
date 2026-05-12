@@ -202,13 +202,12 @@ impl AmbientAgentViewModel {
         match event {
             // If the selected environment is deleted, clear the selection.
             CloudModelEvent::ObjectTrashed { type_and_id, .. }
-            | CloudModelEvent::ObjectDeleted { type_and_id, .. } => {
+            | CloudModelEvent::ObjectDeleted { type_and_id, .. }
                 if type_and_id.as_generic_string_object_id() == self.environment_id
-                    && self.environment_id.is_some()
-                {
-                    self.environment_id = None;
-                    ctx.emit(AmbientAgentViewModelEvent::EnvironmentSelected);
-                }
+                    && self.environment_id.is_some() =>
+            {
+                self.environment_id = None;
+                ctx.emit(AmbientAgentViewModelEvent::EnvironmentSelected);
             }
             // When an environment syncs and gets a ServerId, update our stored ID.
             CloudModelEvent::ObjectSynced {

@@ -25,8 +25,9 @@ use pathfinder_geometry::{
 use warpui_core::fonts::{canvas, RasterizedGlyph};
 use warpui_core::scene::{CornerRadius, GlyphFade, Icon, Image, Layer, Scene, TerminalSurfaceId};
 
+use instant::Instant;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pathfinder_geometry::rect::RectI;
 use std::{fs::File, mem, sync::Once};

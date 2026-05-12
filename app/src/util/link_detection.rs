@@ -277,7 +277,7 @@ fn possible_file_paths_in_word(word: &str) -> impl Iterator<Item = &str> {
         }
     }
     // Sort by longest to shortest.
-    possible_path_byte_ranges.sort_by(|a, b| (b.end - b.start).cmp(&(a.end - a.start)));
+    possible_path_byte_ranges.sort_by_key(|b| std::cmp::Reverse(b.end - b.start));
     possible_path_byte_ranges
         .into_iter()
         .map(|range| &word[(range.start as usize)..(range.end as usize)])

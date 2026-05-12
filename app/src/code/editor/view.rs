@@ -2177,13 +2177,9 @@ impl View for CodeEditorView {
                 GutterRange::DiffHunk {
                     line,
                     in_sliver: true,
-                } => {
-                    if collapsible_diffs {
-                        ctx.dispatch_typed_action(CodeEditorViewAction::ToggleDiffNav(Some(
-                            line.line_range().clone(),
-                        )))
-                    }
-                }
+                } if collapsible_diffs => ctx.dispatch_typed_action(
+                    CodeEditorViewAction::ToggleDiffNav(Some(line.line_range().clone())),
+                ),
                 GutterRange::HiddenSection {
                     line: line_info,
                     expansion_type,

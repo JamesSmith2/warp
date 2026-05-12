@@ -3188,6 +3188,7 @@ impl PaneGroup {
             IPaneType::GetStarted
             | IPaneType::NetworkLog
             | IPaneType::Welcome
+            | IPaneType::WorkspaceLayoutChooser
             | IPaneType::DeferredPlaceholder => TypedPane::Other,
             #[cfg(test)]
             IPaneType::Dummy => TypedPane::Other,

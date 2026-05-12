@@ -469,10 +469,8 @@ pub(super) fn start_confirm(me: &mut GitDialog, ctx: &mut ViewContext<GitDialog>
 
 fn handle_editor_event(me: &mut GitDialog, event: &EditorEvent, ctx: &mut ViewContext<GitDialog>) {
     match event {
-        EditorEvent::Escape => {
-            if !me.loading() {
-                ctx.emit(GitDialogEvent::Cancelled);
-            }
+        EditorEvent::Escape if !me.loading() => {
+            ctx.emit(GitDialogEvent::Cancelled);
         }
         EditorEvent::Edited(_) => {
             me.refresh_confirm_enabled(ctx);

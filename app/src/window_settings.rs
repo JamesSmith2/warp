@@ -100,13 +100,7 @@ impl BackgroundBlurRadius {
     pub const MAX: u8 = 64;
 
     fn validate(&self, new_value: u8) -> u8 {
-        if new_value < Self::MIN {
-            log::warn!(
-                "Window background blur radius should not be smaller than {}",
-                Self::MIN
-            );
-            Self::MIN
-        } else if new_value > Self::MAX {
+        if new_value > Self::MAX {
             log::warn!(
                 "Window background blur radius should not be smaller than {}",
                 Self::MAX

@@ -548,10 +548,8 @@ impl WorkflowView {
             CloudModelEvent::ObjectUpdated {
                 type_and_id: CloudObjectTypeAndId::Workflow(sync_id),
                 source: _,
-            } => {
-                if self.workflow_id() == *sync_id && !self.is_editable() {
-                    self.reset(ctx);
-                }
+            } if self.workflow_id() == *sync_id && !self.is_editable() => {
+                self.reset(ctx);
             }
             CloudModelEvent::ObjectTrashed { .. }
             | CloudModelEvent::ObjectDeleted { .. }

@@ -114,15 +114,22 @@ fn other_error_is_error_with_internal() {
 // --- map_cli_session_status ---
 
 #[test]
+fn cli_idle_maps_to_no_update() {
+    assert!(map_cli_session_status(&CLIAgentSessionStatus::Idle).is_none());
+}
+
+#[test]
 fn cli_in_progress_maps_correctly() {
-    let (state, update) = map_cli_session_status(&CLIAgentSessionStatus::InProgress);
+    let (state, update) =
+        map_cli_session_status(&CLIAgentSessionStatus::InProgress).expect("should map");
     assert_eq!(state, AgentTaskState::InProgress);
     assert!(update.is_none());
 }
 
 #[test]
 fn cli_success_maps_correctly() {
-    let (state, update) = map_cli_session_status(&CLIAgentSessionStatus::Success);
+    let (state, update) =
+        map_cli_session_status(&CLIAgentSessionStatus::Success).expect("should map");
     assert_eq!(state, AgentTaskState::Succeeded);
     assert!(update.is_none());
 }
@@ -131,7 +138,8 @@ fn cli_success_maps_correctly() {
 fn cli_blocked_maps_correctly() {
     let (state, update) = map_cli_session_status(&CLIAgentSessionStatus::Blocked {
         message: Some("needs approval".into()),
-    });
+    })
+    .expect("should map");
     assert_eq!(state, AgentTaskState::Blocked);
     let update = update.expect("should have status update");
     assert!(update.message.contains("needs approval"));
@@ -139,7 +147,8 @@ fn cli_blocked_maps_correctly() {
 
 #[test]
 fn cli_blocked_without_message() {
-    let (state, update) = map_cli_session_status(&CLIAgentSessionStatus::Blocked { message: None });
+    let (state, update) = map_cli_session_status(&CLIAgentSessionStatus::Blocked { message: None })
+        .expect("should map");
     assert_eq!(state, AgentTaskState::Blocked);
     assert!(update.is_none());
 }

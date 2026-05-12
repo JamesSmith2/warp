@@ -5,9 +5,10 @@ use std::{
     io::Write,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+use instant::Instant;
 use serde::Serialize;
 
 use crate::WindowId;

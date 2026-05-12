@@ -10,7 +10,7 @@ use crate::appearance::Appearance;
 use crate::system::{ResourceUsageSample, SystemInfo};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use crate::terminal::cli_agent_sessions::claude_rate_limits::{
-    ClaudeRateLimitUsage, ClaudeRateLimitUsageModel, ClaudeRateLimitWindowKind,
+    parse_claude_status_line_usage, ClaudeRateLimitUsage, ClaudeRateLimitWindowKind,
     ClaudeRateLimitWindowUsage,
 };
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
@@ -87,7 +87,9 @@ const RESOURCE_METRIC_FONT_SIZE: f32 = 10.5;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 const RESOURCE_TIME_FONT_SIZE: f32 = 9.;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
-const CODEX_LIMIT_BAR_HEIGHT: f32 = 8.;
+const RATE_LIMIT_RESET_FONT_SIZE: f32 = 10.;
+#[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+const CODEX_LIMIT_BAR_HEIGHT: f32 = 5.;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 #[derive(Debug, Clone, PartialEq)]
 struct WorkspaceResourceStats {
@@ -163,6 +165,17 @@ impl Workspace {
             DispatchEventResult::StopPropagation
         })
         .finish();
+        let clear_button = EventHandler::new(
+            ConstrainedBox::new(Icon::Trash.to_warpui_icon(icon_color).finish())
+                .with_width(14.)
+                .with_height(14.)
+                .finish(),
+        )
+        .on_left_mouse_down(|ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::ClearWorkspaces);
+            DispatchEventResult::StopPropagation
+        })
+        .finish();
         let mut title_row = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center);
@@ -174,6 +187,11 @@ impl Workspace {
         );
         title_row.add_child(
             Container::new(import_button)
+                .with_padding(Padding::uniform(4.))
+                .finish(),
+        );
+        title_row.add_child(
+            Container::new(clear_button)
                 .with_padding(Padding::uniform(4.))
                 .finish(),
         );
@@ -328,7 +346,7 @@ impl Workspace {
                 );
 
                 let background = if flash_attention {
-                    Fill::Solid(theme.accent().with_opacity(25).into_solid().into())
+                    Fill::Solid(theme.accent().with_opacity(25).into_solid())
                 } else if is_active {
                     Fill::Solid(internal_colors::fg_overlay_2(theme).into())
                 } else if state.is_hovered() {
@@ -542,7 +560,7 @@ impl Workspace {
         ));
         match self.focused_pane_cli_agent(app) {
             Some(CLIAgent::Claude) => {
-                let claude_usage = ClaudeRateLimitUsageModel::as_ref(app).usage();
+                let claude_usage = self.focused_pane_claude_rate_limit_usage(app);
                 column.add_child(Self::render_claude_rate_limit_stats(
                     &claude_usage,
                     appearance,
@@ -703,18 +721,42 @@ impl Workspace {
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn focused_pane_claude_rate_limit_usage(&self, app: &AppContext) -> ClaudeRateLimitUsage {
+        let pane_group = self.active_tab_pane_group().as_ref(app);
+        let current = pane_group
+            .focused_session_view(app)
+            .and_then(|terminal_view| {
+                parse_claude_status_line_usage(
+                    &Self::terminal_visible_output(terminal_view.as_ref(app)),
+                    Utc::now(),
+                )
+            });
+
+        ClaudeRateLimitUsage {
+            current,
+            last_error: None,
+            is_stale: false,
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn render_claude_rate_limit_stats(
         usage: &ClaudeRateLimitUsage,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         let current = usage.current.as_ref();
+        let now = Utc::now();
 
         if let Some(primary) = current.and_then(|sample| sample.primary.as_ref()) {
-            column.add_child(Self::render_claude_rate_limit_card(primary, appearance));
+            column.add_child(Self::render_claude_rate_limit_card(
+                primary, now, appearance,
+            ));
         }
         if let Some(secondary) = current.and_then(|sample| sample.secondary.as_ref()) {
-            column.add_child(Self::render_claude_rate_limit_card(secondary, appearance));
+            column.add_child(Self::render_claude_rate_limit_card(
+                secondary, now, appearance,
+            ));
         }
         if let Some(label) = Self::claude_rate_limit_status_label(usage) {
             column.add_child(Self::render_codex_rate_limit_status(label, appearance));
@@ -728,6 +770,7 @@ impl Workspace {
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn render_claude_rate_limit_card(
         window: &ClaudeRateLimitWindowUsage,
+        now: DateTime<Utc>,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
@@ -769,9 +812,9 @@ impl Workspace {
         column.add_child(
             Container::new(
                 Text::new_inline(
-                    Self::claude_rate_limit_reset_label(window),
+                    Self::claude_rate_limit_reset_label(window, now),
                     appearance.ui_font_family(),
-                    RESOURCE_TIME_FONT_SIZE,
+                    RATE_LIMIT_RESET_FONT_SIZE,
                 )
                 .with_color(reset_color)
                 .finish(),
@@ -798,19 +841,15 @@ impl Workspace {
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
-    fn claude_rate_limit_reset_label(window: &ClaudeRateLimitWindowUsage) -> String {
-        match window.resets_at {
-            Some(resets_at) => {
-                let local_reset = resets_at.with_timezone(&Local);
-                let is_long_window = matches!(window.kind, ClaudeRateLimitWindowKind::Secondary);
-                if is_long_window {
-                    format!("Resets {}", local_reset.format("%b %d %H:%M"))
-                } else {
-                    format!("Resets {}", local_reset.format("%H:%M"))
-                }
-            }
-            None => "Reset unavailable".to_string(),
-        }
+    fn claude_rate_limit_reset_label(
+        window: &ClaudeRateLimitWindowUsage,
+        now: DateTime<Utc>,
+    ) -> String {
+        Self::rate_limit_reset_label(
+            window.resets_at,
+            matches!(window.kind, ClaudeRateLimitWindowKind::Secondary),
+            now,
+        )
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
@@ -822,7 +861,7 @@ impl Workspace {
             return Some("Unavailable".to_string());
         }
         if usage.current.is_none() {
-            return Some("Loading".to_string());
+            return Some("Waiting for Claude limits".to_string());
         }
         None
     }
@@ -844,6 +883,7 @@ impl Workspace {
                     CodexRateLimitWindowKind::Primary,
                     now,
                 ),
+                now,
                 appearance,
             ));
         }
@@ -856,6 +896,7 @@ impl Workspace {
                     CodexRateLimitWindowKind::Secondary,
                     now,
                 ),
+                now,
                 appearance,
             ));
         }
@@ -876,6 +917,7 @@ impl Workspace {
     fn render_codex_rate_limit_card(
         window: &CodexRateLimitWindowUsage,
         empty_label: Option<String>,
+        now: DateTime<Utc>,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
@@ -932,9 +974,9 @@ impl Workspace {
         column.add_child(
             Container::new(
                 Text::new_inline(
-                    Self::codex_rate_limit_reset_label(window),
+                    Self::codex_rate_limit_reset_label(window, now),
                     appearance.ui_font_family(),
-                    RESOURCE_TIME_FONT_SIZE,
+                    RATE_LIMIT_RESET_FONT_SIZE,
                 )
                 .with_color(reset_color)
                 .finish(),
@@ -1153,21 +1195,38 @@ impl Workspace {
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
-    fn codex_rate_limit_reset_label(window: &CodexRateLimitWindowUsage) -> String {
-        match window.resets_at {
+    fn rate_limit_reset_label(
+        resets_at: Option<DateTime<Utc>>,
+        is_long_window: bool,
+        now: DateTime<Utc>,
+    ) -> String {
+        match resets_at {
             Some(resets_at) => {
                 let local_reset = resets_at.with_timezone(&Local);
-                let is_long_window = window
-                    .window_duration_mins
-                    .is_some_and(|minutes| minutes >= 24 * 60);
-                if is_long_window {
-                    format!("Resets {}", local_reset.format("%b %d %H:%M"))
+                let reset_at = if is_long_window {
+                    local_reset.format("%b %d %H:%M").to_string()
                 } else {
-                    format!("Resets {}", local_reset.format("%H:%M"))
-                }
+                    local_reset.format("%H:%M").to_string()
+                };
+                let countdown = Self::format_rate_limit_reset_countdown(resets_at, now);
+                format!("Resets {reset_at} ({countdown})")
             }
             None => "Reset unavailable".to_string(),
         }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn codex_rate_limit_reset_label(
+        window: &CodexRateLimitWindowUsage,
+        now: DateTime<Utc>,
+    ) -> String {
+        Self::rate_limit_reset_label(
+            window.resets_at,
+            window
+                .window_duration_mins
+                .is_some_and(|minutes| minutes >= 24 * 60),
+            now,
+        )
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
@@ -1229,15 +1288,25 @@ impl Workspace {
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    fn format_rate_limit_reset_countdown(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+        let remaining = resets_at - now;
+        if remaining <= chrono::Duration::zero() {
+            "now".to_string()
+        } else {
+            format!("in {}", Self::format_codex_rate_limit_duration(remaining))
+        }
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     fn format_codex_rate_limit_window_duration(minutes: u32) -> String {
-        if minutes % 10080 == 0 {
+        if minutes.is_multiple_of(10080) {
             let weeks = minutes / 10080;
             if weeks == 1 {
                 "Weekly".to_string()
             } else {
                 format!("{weeks} week")
             }
-        } else if minutes % 60 == 0 {
+        } else if minutes.is_multiple_of(60) {
             let hours = minutes / 60;
             if hours == 1 {
                 "1 hour".to_string()
@@ -1607,6 +1676,23 @@ mod tests {
             used_percent: 100. - remaining_percent,
             remaining_percent,
             window_duration_mins,
+            resets_at,
+        }
+    }
+
+    fn claude_window(
+        kind: ClaudeRateLimitWindowKind,
+        remaining_percent: f32,
+        resets_at: Option<DateTime<Utc>>,
+    ) -> ClaudeRateLimitWindowUsage {
+        ClaudeRateLimitWindowUsage {
+            kind,
+            used_percent: 100. - remaining_percent,
+            remaining_percent,
+            window_duration_mins: Some(match kind {
+                ClaudeRateLimitWindowKind::Primary => 300,
+                ClaudeRateLimitWindowKind::Secondary => 10080,
+            }),
             resets_at,
         }
     }
@@ -2135,6 +2221,28 @@ Working (8s - esc to interrupt)
     }
 
     #[test]
+    fn claude_rate_limit_status_label_waits_for_visible_status_line_limits() {
+        assert_eq!(
+            Workspace::claude_rate_limit_status_label(&ClaudeRateLimitUsage::default()),
+            Some("Waiting for Claude limits".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_rate_limit_status_label_hides_when_status_line_limits_parse() {
+        let usage = ClaudeRateLimitUsage {
+            current: parse_claude_status_line_usage(
+                "Claude | 5h 22% | 7d 15%",
+                DateTime::UNIX_EPOCH,
+            ),
+            last_error: None,
+            is_stale: false,
+        };
+
+        assert_eq!(Workspace::claude_rate_limit_status_label(&usage), None);
+    }
+
+    #[test]
     fn codex_rate_limit_window_title_names_five_hour_limit() {
         assert_eq!(
             Workspace::codex_rate_limit_window_title(&codex_window(
@@ -2161,8 +2269,9 @@ Working (8s - esc to interrupt)
     }
 
     #[test]
-    fn codex_rate_limit_reset_label_uses_local_time() {
+    fn codex_rate_limit_reset_label_uses_local_time_and_countdown() {
         let reset = DateTime::<Utc>::from_timestamp(1777880803, 0).unwrap();
+        let now = reset - chrono::Duration::minutes(95);
         let window = codex_window(
             CodexRateLimitWindowKind::Primary,
             Some(300),
@@ -2171,14 +2280,18 @@ Working (8s - esc to interrupt)
         );
 
         assert_eq!(
-            Workspace::codex_rate_limit_reset_label(&window),
-            format!("Resets {}", reset.with_timezone(&Local).format("%H:%M"))
+            Workspace::codex_rate_limit_reset_label(&window, now),
+            format!(
+                "Resets {} (in 1h 35m)",
+                reset.with_timezone(&Local).format("%H:%M")
+            )
         );
     }
 
     #[test]
-    fn codex_rate_limit_reset_label_includes_date_for_weekly_limit() {
+    fn codex_rate_limit_reset_label_includes_date_and_countdown_for_weekly_limit() {
         let reset = DateTime::<Utc>::from_timestamp(1777880803, 0).unwrap();
+        let now = reset - chrono::Duration::hours(12) - chrono::Duration::minutes(8);
         let window = codex_window(
             CodexRateLimitWindowKind::Secondary,
             Some(10080),
@@ -2187,9 +2300,9 @@ Working (8s - esc to interrupt)
         );
 
         assert_eq!(
-            Workspace::codex_rate_limit_reset_label(&window),
+            Workspace::codex_rate_limit_reset_label(&window, now),
             format!(
-                "Resets {}",
+                "Resets {} (in 12h 8m)",
                 reset.with_timezone(&Local).format("%b %d %H:%M")
             )
         );
@@ -2200,8 +2313,58 @@ Working (8s - esc to interrupt)
         let window = codex_window(CodexRateLimitWindowKind::Primary, Some(300), 99., None);
 
         assert_eq!(
-            Workspace::codex_rate_limit_reset_label(&window),
+            Workspace::codex_rate_limit_reset_label(&window, DateTime::UNIX_EPOCH),
             "Reset unavailable"
+        );
+    }
+
+    #[test]
+    fn codex_rate_limit_reset_label_handles_elapsed_timestamp() {
+        let now = DateTime::<Utc>::from_timestamp(1777880803, 0).unwrap();
+        let reset = now - chrono::Duration::minutes(1);
+        let window = codex_window(
+            CodexRateLimitWindowKind::Primary,
+            Some(300),
+            99.,
+            Some(reset),
+        );
+
+        assert_eq!(
+            Workspace::codex_rate_limit_reset_label(&window, now),
+            format!(
+                "Resets {} (now)",
+                reset.with_timezone(&Local).format("%H:%M")
+            )
+        );
+    }
+
+    #[test]
+    fn claude_rate_limit_reset_label_uses_countdown() {
+        let reset = DateTime::<Utc>::from_timestamp(1777880803, 0).unwrap();
+        let now = reset - chrono::Duration::minutes(45);
+        let window = claude_window(ClaudeRateLimitWindowKind::Primary, 81., Some(reset));
+
+        assert_eq!(
+            Workspace::claude_rate_limit_reset_label(&window, now),
+            format!(
+                "Resets {} (in 45m)",
+                reset.with_timezone(&Local).format("%H:%M")
+            )
+        );
+    }
+
+    #[test]
+    fn claude_rate_limit_reset_label_includes_date_for_weekly_limit() {
+        let reset = DateTime::<Utc>::from_timestamp(1777880803, 0).unwrap();
+        let now = reset - chrono::Duration::hours(25);
+        let window = claude_window(ClaudeRateLimitWindowKind::Secondary, 19., Some(reset));
+
+        assert_eq!(
+            Workspace::claude_rate_limit_reset_label(&window, now),
+            format!(
+                "Resets {} (in 25h)",
+                reset.with_timezone(&Local).format("%b %d %H:%M")
+            )
         );
     }
 

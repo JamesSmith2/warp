@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::ffi::OsStr;
-use std::time::Instant;
 
 use byte_unit::Byte;
 use chrono::{DateTime, Local, Utc};
+use instant::Instant;
 use itertools::Itertools as _;
 use num_traits::Zero;
 use ordered_float::OrderedFloat;

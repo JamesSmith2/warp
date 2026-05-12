@@ -421,7 +421,7 @@ mod integration_tests {
         assert!(!results.is_empty());
 
         // Sort by score (highest first)
-        results.sort_by(|a, b| b.match_result.score.cmp(&a.match_result.score));
+        results.sort_by_key(|b| std::cmp::Reverse(b.match_result.score));
 
         // "src/main.rs" should be the top result (exact filename match)
         assert_eq!(results[0].path, "src/main.rs");

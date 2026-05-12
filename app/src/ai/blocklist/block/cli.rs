@@ -452,10 +452,8 @@ impl CLISubagentView {
         );
 
         ctx.subscribe_to_model(&subagent_controller, |me, _, event, ctx| match event {
-            CLISubagentEvent::UpdatedControl { block_id, .. } => {
-                if *block_id == me.block_id {
-                    ctx.notify();
-                }
+            CLISubagentEvent::UpdatedControl { block_id, .. } if *block_id == me.block_id => {
+                ctx.notify();
             }
             CLISubagentEvent::ToggledHideResponses => {
                 me.reset_input_dismiss_timer(ctx);
@@ -638,25 +636,25 @@ impl CLISubagentView {
             AIAgentActionType::SearchCodebase(_)
             | AIAgentActionType::ReadFiles(_)
             | AIAgentActionType::Grep { .. }
-            | AIAgentActionType::FileGlobV2 { .. } => {
-                if should_show_read_files_speedbump(ctx) {
-                    AISettings::handle(ctx).update(ctx, |settings, ctx| {
-                        let _ = settings
-                            .should_show_agent_mode_autoread_files_speedbump
-                            .set_value(false, ctx);
-                    });
+            | AIAgentActionType::FileGlobV2 { .. }
+                if should_show_read_files_speedbump(ctx) =>
+            {
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    let _ = settings
+                        .should_show_agent_mode_autoread_files_speedbump
+                        .set_value(false, ctx);
+                });
 
-                    BlocklistAIPermissions::handle(ctx).update(ctx, |permissions, ctx| {
-                        if let Err(e) = permissions.set_always_allow_read_files(
-                            self.always_allow_read_files_checked,
-                            self.terminal_view_id,
-                            ctx,
-                        ) {
-                            report_error!(e);
-                        }
-                    });
-                    ctx.notify();
-                }
+                BlocklistAIPermissions::handle(ctx).update(ctx, |permissions, ctx| {
+                    if let Err(e) = permissions.set_always_allow_read_files(
+                        self.always_allow_read_files_checked,
+                        self.terminal_view_id,
+                        ctx,
+                    ) {
+                        report_error!(e);
+                    }
+                });
+                ctx.notify();
             }
             _ => {}
         }
@@ -796,11 +794,11 @@ impl CLISubagentView {
                     ctx.notify();
                 });
                 ctx.subscribe_to_view(&view, |me, view, event, ctx| match event {
-                    CodeEditorEvent::SelectionChanged => {
-                        if view.as_ref(ctx).selected_text(ctx).is_some() {
-                            me.clear_other_selections(Some(view.id()), ctx);
-                            ctx.emit(CLISubagentViewEvent::TextSelected);
-                        }
+                    CodeEditorEvent::SelectionChanged
+                        if view.as_ref(ctx).selected_text(ctx).is_some() =>
+                    {
+                        me.clear_other_selections(Some(view.id()), ctx);
+                        ctx.emit(CLISubagentViewEvent::TextSelected);
                     }
                     CodeEditorEvent::CopiedEmptyText => {
                         ctx.emit(CLISubagentViewEvent::CopiedEmptyText);
@@ -1157,31 +1155,27 @@ impl View for CLISubagentView {
                             }
                         }
                     }
-                    AIAgentOutputMessageType::WebSearch(WebSearchStatus::Searching { query }) => {
-                        if !should_hide_responses {
-                            result.add_child(
-                                render_scrollable_container(
-                                    ScrollableContainerProps {
-                                        scroll_state: self
-                                            .state_handles
-                                            .action_scroll_state
-                                            .clone(),
-                                        child: render_web_search(query.clone(), app),
-                                        background_color: internal_colors::neutral_2(
-                                            appearance.theme(),
-                                        ),
-                                        border: Some(
-                                            Border::all(1.).with_border_fill(
-                                                internal_colors::neutral_3(theme),
-                                            ),
-                                        ),
-                                    },
-                                    app,
-                                )
-                                .with_margin_bottom(8.)
-                                .finish(),
-                            );
-                        }
+                    AIAgentOutputMessageType::WebSearch(WebSearchStatus::Searching { query })
+                        if !should_hide_responses =>
+                    {
+                        result.add_child(
+                            render_scrollable_container(
+                                ScrollableContainerProps {
+                                    scroll_state: self.state_handles.action_scroll_state.clone(),
+                                    child: render_web_search(query.clone(), app),
+                                    background_color: internal_colors::neutral_2(
+                                        appearance.theme(),
+                                    ),
+                                    border: Some(
+                                        Border::all(1.)
+                                            .with_border_fill(internal_colors::neutral_3(theme)),
+                                    ),
+                                },
+                                app,
+                            )
+                            .with_margin_bottom(8.)
+                            .finish(),
+                        );
                     }
                     _ => (),
                 }

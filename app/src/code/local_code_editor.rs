@@ -346,10 +346,8 @@ impl LocalCodeEditorView {
                     ctx.emit(LocalCodeEditorEvent::VimMinimizeRequested);
                 }
             }
-            CodeEditorEvent::EscapePressed => {
-                if me.dismiss_lsp_overlays(ctx) {
-                    ctx.notify();
-                }
+            CodeEditorEvent::EscapePressed if me.dismiss_lsp_overlays(ctx) => {
+                ctx.notify();
             }
             CodeEditorEvent::DiffUpdated => {
                 ctx.emit(LocalCodeEditorEvent::DiffStatusUpdated);
@@ -1072,7 +1070,7 @@ impl LocalCodeEditorView {
                         }
 
                         // Sort edits by start position in reverse order to avoid offset shifting issues
-                        edits.sort_by(|a, b| b.1.start.cmp(&a.1.start));
+                        edits.sort_by_key(|b| std::cmp::Reverse(b.1.start));
 
                         if let Ok(edits) = Vec1::try_from_vec(edits) {
                             editor.apply_edits(edits, ctx);

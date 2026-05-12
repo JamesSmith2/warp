@@ -2854,16 +2854,15 @@ impl Input {
                 contains_user_query: is_user_initiated,
                 is_queued_prompt,
                 ..
-            } => {
+            }
                 // Skip the buffer clear for queued prompts. The user may have typed new
                 // input while the agent was busy and we don't want to wipe it on auto-send.
-                if *is_user_initiated && !*is_queued_prompt {
+                if *is_user_initiated && !*is_queued_prompt => {
                     me.editor.update(ctx, |editor, ctx| {
                         editor.system_clear_buffer(true, ctx);
                     });
                     ctx.notify();
                 }
-            }
             BlocklistAIControllerEvent::ExportConversationToFile {
                 #[cfg_attr(target_family = "wasm", allow(unused))]
                 filename,
@@ -5923,7 +5922,7 @@ impl Input {
                 ctx.notify();
             }
             AISettingsChangedEvent::AIAutoDetectionEnabled { .. }
-            | AISettingsChangedEvent::NLDInTerminalEnabled { .. } => {
+            | AISettingsChangedEvent::NLDInTerminalEnabled { .. }
                 // The input model handles updating the lock state via its own subscription.
                 // If NLD is now enabled for the current context and the buffer is non-empty,
                 // trigger autodetection on the current buffer contents.
@@ -5932,13 +5931,12 @@ impl Input {
                     .as_ref(ctx)
                     .should_run_input_autodetection(ctx)
                     && !self.editor.as_ref(ctx).buffer_text(ctx).is_empty()
-                {
+                => {
                     self.run_input_background_jobs(
                         InputBackgroundJobOptions::default().with_ai_input_detection(),
                         ctx,
                     );
                 }
-            }
             #[cfg(feature = "voice_input")]
             AISettingsChangedEvent::VoiceInputEnabled { .. } => {
                 self.update_voice_transcription_options(ctx);
@@ -7024,7 +7022,7 @@ impl Input {
             .iter()
             .map(|style_run| style_run.byte_range().clone())
             .collect::<Vec<_>>();
-        ranges.sort_by(|a, b| a.start.cmp(&b.start));
+        ranges.sort_by_key(|a| a.start);
 
         let capacity = ranges.len();
 
@@ -9566,10 +9564,10 @@ impl Input {
             EditorEvent::Navigate(NavigationKey::ShiftTab) => {
                 self.input_shift_tab(ctx);
             }
-            EditorEvent::Navigate(NavigationKey::Right) => {
+            EditorEvent::Navigate(NavigationKey::Right)
                 // If the AI context menu is open and we're at the end of the buffer,
                 // make right arrow act like enter and select the current item
-                if self.suggestions_mode_model.as_ref(ctx).is_ai_context_menu() {
+                if self.suggestions_mode_model.as_ref(ctx).is_ai_context_menu() => {
                     self.editor.update(ctx, |editor, ctx| {
                         if let Some(ai_context_menu) = editor.ai_context_menu() {
                             ai_context_menu.update(ctx, |menu, ctx| {
@@ -9578,7 +9576,6 @@ impl Input {
                         }
                     });
                 }
-            }
             EditorEvent::Enter => self.input_enter(ctx),
             EditorEvent::CmdEnter => self.input_cmd_enter(ctx),
             EditorEvent::CtrlEnter => {
@@ -11303,16 +11300,16 @@ impl Input {
     }
 
     fn input_shift_tab(&mut self, ctx: &mut ViewContext<Self>) {
-        match self.suggestions_mode_model.as_ref(ctx).mode() {
+        let mode = self.suggestions_mode_model.as_ref(ctx).mode().clone();
+        match mode {
             // If the model selector is open and has multiple tabs,
             // shift + tab should cycle between them.
-            InputSuggestionsMode::ModelSelector => {
+            InputSuggestionsMode::ModelSelector
                 if self
                     .inline_model_selector_view
-                    .update(ctx, |view, ctx| view.select_next_tab(ctx))
-                {
-                    return;
-                }
+                    .update(ctx, |view, ctx| view.select_next_tab(ctx)) =>
+            {
+                return;
             }
             // If the inline history menu is open and has multiple tabs,
             // shift + tab should cycle between them.
@@ -11329,13 +11326,12 @@ impl Input {
             }
             // If the conversation menu is open and has multiple tabs,
             // shift + tab should cycle between them.
-            InputSuggestionsMode::ConversationMenu => {
+            InputSuggestionsMode::ConversationMenu
                 if self
                     .inline_conversation_menu_view
-                    .update(ctx, |view, ctx| view.select_next_tab(ctx))
-                {
-                    return;
-                }
+                    .update(ctx, |view, ctx| view.select_next_tab(ctx)) =>
+            {
+                return;
             }
             // If we're in CompletionSuggestions mode, shift tab moves to the previous selection.
             InputSuggestionsMode::CompletionSuggestions { .. } => {

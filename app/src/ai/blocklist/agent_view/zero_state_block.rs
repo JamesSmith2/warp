@@ -149,20 +149,18 @@ impl AgentViewZeroStateBlock {
             model_events_dispatcher,
             move |me, model_events_dispatcher, event, ctx| {
                 match event {
-                    ModelEvent::BlockCompleted(block_completed) => {
+                    ModelEvent::BlockCompleted(block_completed)
                         if matches!(block_completed.block_type, BlockType::User(..))
-                            && me.should_hide != me.should_hide(ctx)
+                            && me.should_hide != me.should_hide(ctx) =>
+                    {
+                        me.should_hide = true;
+                        ctx.unsubscribe_to_model(&model_events_dispatcher);
+                        ctx.unsubscribe_to_model(&BlocklistAIHistoryModel::handle(ctx));
+                        if let Some(cloud_agent_view_model) = cloud_agent_view_model_clone.as_ref()
                         {
-                            me.should_hide = true;
-                            ctx.unsubscribe_to_model(&model_events_dispatcher);
-                            ctx.unsubscribe_to_model(&BlocklistAIHistoryModel::handle(ctx));
-                            if let Some(cloud_agent_view_model) =
-                                cloud_agent_view_model_clone.as_ref()
-                            {
-                                ctx.unsubscribe_to_model(cloud_agent_view_model);
-                            }
-                            ctx.notify();
+                            ctx.unsubscribe_to_model(cloud_agent_view_model);
                         }
+                        ctx.notify();
                     }
                     ModelEvent::Handler(AnsiHandlerEvent::Bootstrapped { .. }) => {
                         // Session metadata such as pwd can be unavailable in zero-state until

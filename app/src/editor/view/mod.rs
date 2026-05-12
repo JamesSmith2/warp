@@ -3390,11 +3390,11 @@ impl EditorView {
     ) {
         // Ensure our cached copy of these settings are up-to-date.
         match evt {
-            AppEditorSettingsChangedEvent::CursorDisplayState { .. } => {
-                if self.cursor_display_override.is_some() {
-                    self.cursor_display_override =
-                        Some(*AppEditorSettings::as_ref(ctx).cursor_display_type);
-                }
+            AppEditorSettingsChangedEvent::CursorDisplayState { .. }
+                if self.cursor_display_override.is_some() =>
+            {
+                self.cursor_display_override =
+                    Some(*AppEditorSettings::as_ref(ctx).cursor_display_type);
             }
             AppEditorSettingsChangedEvent::AutocompleteSymbols { .. } => {
                 self.autocomplete_symbols_setting =

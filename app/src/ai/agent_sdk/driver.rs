@@ -2191,6 +2191,7 @@ impl AgentDriver {
                         CLIAgentSessionStatus::InProgress => {
                             harness_exit.cancel_idle_timeout();
                         }
+                        CLIAgentSessionStatus::Idle => {}
                     }
                 }
                 CLIAgentSessionsModelEvent::SessionUpdated {

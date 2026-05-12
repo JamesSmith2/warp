@@ -191,15 +191,14 @@ impl BlocklistAIStatusBar {
                 }
                 | BlocklistAIHistoryEvent::RemoveConversation {
                     conversation_id, ..
-                } => {
-                    if me.active_exchange_model.as_ref().is_some_and(|model| {
-                        model
-                            .conversation_id(ctx)
-                            .is_some_and(|id| id == *conversation_id)
-                    }) {
-                        me.active_exchange_model = None;
-                        ctx.notify();
-                    }
+                } if me.active_exchange_model.as_ref().is_some_and(|model| {
+                    model
+                        .conversation_id(ctx)
+                        .is_some_and(|id| id == *conversation_id)
+                }) =>
+                {
+                    me.active_exchange_model = None;
+                    ctx.notify();
                 }
                 BlocklistAIHistoryEvent::UpdatedConversationStatus { .. } => {
                     ctx.notify();

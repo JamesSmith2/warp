@@ -550,7 +550,7 @@ impl RequestedCommandView {
     ) {
         match event {
             CodeEditorEvent::Focused => ctx.emit(RequestedCommandViewEvent::EditorFocused),
-            CodeEditorEvent::SelectionChanged => {
+            CodeEditorEvent::SelectionChanged
                 // If there's an ongoing text selection, clear all other selections within the
                 // `RequestedCommandView`'s view sub-hierarchy to ensure only one component
                 // has a selection at a time.
@@ -558,10 +558,9 @@ impl RequestedCommandView {
                 // The `is_some` check is necessary because `CodeEditorEvent::SelectionChanged` is
                 // also emitted when the editor's selection is cleared via external means
                 // (i.e. when a text selection is made outside the `CodeEditorView`).
-                if view.as_ref(ctx).selected_text(ctx).is_some() {
+                if view.as_ref(ctx).selected_text(ctx).is_some() => {
                     ctx.emit(RequestedCommandViewEvent::TextSelected);
                 }
-            }
             CodeEditorEvent::CopiedEmptyText => {
                 ctx.emit(RequestedCommandViewEvent::CopiedEmptyText);
             }

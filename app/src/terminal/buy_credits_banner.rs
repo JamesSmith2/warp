@@ -198,20 +198,20 @@ impl BuyCreditsBanner {
                 }
                 ctx.notify();
             }
-            UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess => {
-                if self.banner_auto_reload_update_in_flight {
-                    self.banner_auto_reload_update_in_flight = false;
-                    ctx.notify();
-                }
+            UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess
+                if self.banner_auto_reload_update_in_flight =>
+            {
+                self.banner_auto_reload_update_in_flight = false;
+                ctx.notify();
             }
-            UserWorkspacesEvent::UpdateWorkspaceSettingsRejected(_) => {
-                if self.banner_auto_reload_update_in_flight {
-                    self.banner_auto_reload_update_in_flight = false;
-                    ctx.emit(BuyCreditsBannerEvent::ShowAutoReloadError {
+            UserWorkspacesEvent::UpdateWorkspaceSettingsRejected(_)
+                if self.banner_auto_reload_update_in_flight =>
+            {
+                self.banner_auto_reload_update_in_flight = false;
+                ctx.emit(BuyCreditsBannerEvent::ShowAutoReloadError {
                         error_message: "Failed to enable auto-reload for your team. Please try again in Settings > Billing and Usage.",
                     });
-                    ctx.notify();
-                }
+                ctx.notify();
             }
             _ => {}
         }

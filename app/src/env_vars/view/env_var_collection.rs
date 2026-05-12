@@ -984,13 +984,12 @@ impl EnvVarCollectionView {
 
     fn handle_cloud_model_event(&mut self, event: &CloudModelEvent, ctx: &mut ViewContext<Self>) {
         match event {
-            CloudModelEvent::ObjectCreated { type_and_id, .. } => {
+            CloudModelEvent::ObjectCreated { type_and_id, .. }
                 if self
                     .as_active_env_var_collection_id(type_and_id, ctx)
-                    .is_some()
-                {
-                    ctx.notify();
-                }
+                    .is_some() =>
+            {
+                ctx.notify();
             }
             CloudModelEvent::ObjectTrashed { .. }
             | CloudModelEvent::ObjectDeleted { .. }

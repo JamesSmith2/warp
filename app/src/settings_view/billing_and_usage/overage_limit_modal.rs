@@ -172,11 +172,9 @@ impl SpendingLimitModal {
 
     fn handle_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
         match event {
-            EditorEvent::Enter => {
-                if self.input_error_state.is_none() {
-                    if let Some(amount_cents) = self.parse_amount(ctx) {
-                        ctx.emit(SpendingLimitModalEvent::Update { amount_cents });
-                    }
+            EditorEvent::Enter if self.input_error_state.is_none() => {
+                if let Some(amount_cents) = self.parse_amount(ctx) {
+                    ctx.emit(SpendingLimitModalEvent::Update { amount_cents });
                 }
             }
             EditorEvent::Escape => {

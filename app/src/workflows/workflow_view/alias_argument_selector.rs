@@ -74,12 +74,10 @@ impl AliasArgumentSelector {
         });
 
         ctx.subscribe_to_view(&editor, |_me, editor, event, ctx| match event {
-            EditorEvent::Edited(origin) => {
-                if *origin != EditOrigin::SystemEdit {
-                    ctx.emit(AliasArgumentSelectorEvent::ValueSet(
-                        editor.as_ref(ctx).buffer_text(ctx).clone(),
-                    ));
-                }
+            EditorEvent::Edited(origin) if *origin != EditOrigin::SystemEdit => {
+                ctx.emit(AliasArgumentSelectorEvent::ValueSet(
+                    editor.as_ref(ctx).buffer_text(ctx).clone(),
+                ));
             }
             EditorEvent::Navigate(nav_key) => {
                 ctx.emit(AliasArgumentSelectorEvent::Navigate(*nav_key));

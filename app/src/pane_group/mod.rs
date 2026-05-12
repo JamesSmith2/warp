@@ -30,6 +30,7 @@ use crate::notebooks::file::FileNotebookView;
 use crate::pane_group::focus_state::PaneGroupFocusEvent;
 use crate::pane_group::pane::get_started_pane::GetStartedPane;
 use crate::pane_group::pane::welcome_pane::WelcomePane;
+use crate::pane_group::pane::workspace_layout_chooser_pane::WorkspaceLayoutChooserPane;
 use crate::pane_group::pane::ActionOrigin;
 use crate::quit_warning::UnsavedStateSummary;
 #[cfg(target_family = "wasm")]
@@ -45,6 +46,7 @@ use crate::terminal::view::inline_banner::{
     ZeroStatePromptSuggestionTriggeredFrom, ZeroStatePromptSuggestionType,
 };
 use crate::terminal::view::load_ai_conversation::RestoredAIConversation;
+use crate::terminal::CLIAgent;
 use crate::undo_close::UndoCloseStack;
 use crate::undo_close::UndoCloseStackEvent;
 #[cfg(target_family = "wasm")]
@@ -837,6 +839,73 @@ pub enum PanesLayout {
 impl Default for PanesLayout {
     fn default() -> Self {
         Self::SingleTerminal(Box::default())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalLayoutPreset {
+    Single,
+    TwoColumns,
+    TwoRows,
+    ThreeColumns,
+    Grid2x2,
+}
+
+impl TerminalLayoutPreset {
+    pub const ALL: [Self; 5] = [
+        Self::Single,
+        Self::TwoColumns,
+        Self::TwoRows,
+        Self::ThreeColumns,
+        Self::Grid2x2,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Single => "Single terminal",
+            Self::TwoColumns => "2 columns",
+            Self::TwoRows => "2 rows",
+            Self::ThreeColumns => "3 columns",
+            Self::Grid2x2 => "2x2 grid",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Single => "Keep one focused terminal.",
+            Self::TwoColumns => "Add a terminal to the right.",
+            Self::TwoRows => "Add a terminal below.",
+            Self::ThreeColumns => "Create three side-by-side terminals.",
+            Self::Grid2x2 => "Create four terminals in a grid.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerminalLayoutAgentMode {
+    #[default]
+    None,
+    Claude,
+    Codex,
+}
+
+impl TerminalLayoutAgentMode {
+    pub const ALL: [Self; 3] = [Self::None, Self::Claude, Self::Codex];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "No tool",
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+        }
+    }
+
+    pub fn cli_agent(self) -> Option<CLIAgent> {
+        match self {
+            Self::None => None,
+            Self::Claude => Some(CLIAgent::Claude),
+            Self::Codex => Some(CLIAgent::Codex),
+        }
     }
 }
 
@@ -4200,6 +4269,116 @@ impl PaneGroup {
     /// The current working directory of the active terminal session, if it's local.
     pub fn active_session_path(&self, ctx: &AppContext) -> Option<PathBuf> {
         self.session_path(&self.active_session_id(ctx)?, ctx)
+    }
+
+    fn single_visible_terminal_pane_id(&self) -> Option<PaneId> {
+        if self.panes.visible_pane_count() != 1 {
+            return None;
+        }
+        let pane_id = self.pane_id_by_index(0)?;
+        self.terminal_session_by_id(pane_id).map(|_| pane_id)
+    }
+
+    fn visible_workspace_layout_chooser_pane_id(&self) -> Option<PaneId> {
+        self.panes.visible_pane_ids().into_iter().find(|pane_id| {
+            self.pane_contents
+                .get(pane_id)
+                .is_some_and(|pane| pane.as_any().is::<WorkspaceLayoutChooserPane>())
+        })
+    }
+
+    pub fn is_single_visible_terminal_pane(&self) -> bool {
+        self.single_visible_terminal_pane_id().is_some()
+    }
+
+    pub fn open_terminal_layout_chooser(&mut self, ctx: &mut ViewContext<Self>) -> bool {
+        if !self.is_single_visible_terminal_pane() {
+            return false;
+        }
+
+        self.add_pane_with_direction(
+            Direction::Right,
+            WorkspaceLayoutChooserPane::new(ctx),
+            true,
+            ctx,
+        );
+        true
+    }
+
+    pub fn apply_terminal_layout_preset(
+        &mut self,
+        preset: TerminalLayoutPreset,
+        agent_mode: TerminalLayoutAgentMode,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if let Some(chooser_pane_id) = self.visible_workspace_layout_chooser_pane_id() {
+            self.close_pane(chooser_pane_id, ctx);
+        }
+
+        let Some(base_pane_id) = self.single_visible_terminal_pane_id() else {
+            return false;
+        };
+        let base_session_id = base_pane_id.as_terminal_pane_id();
+
+        match preset {
+            TerminalLayoutPreset::Single => {}
+            TerminalLayoutPreset::TwoColumns => {
+                self.add_session(Direction::Right, None, base_session_id, None, None, ctx);
+            }
+            TerminalLayoutPreset::TwoRows => {
+                self.add_session(Direction::Down, None, base_session_id, None, None, ctx);
+            }
+            TerminalLayoutPreset::ThreeColumns => {
+                self.add_session(Direction::Right, None, base_session_id, None, None, ctx);
+                self.add_session(Direction::Right, None, base_session_id, None, None, ctx);
+            }
+            TerminalLayoutPreset::Grid2x2 => {
+                let top_right =
+                    self.add_session(Direction::Right, None, base_session_id, None, None, ctx);
+                self.add_session(
+                    Direction::Down,
+                    Some(base_pane_id),
+                    base_session_id,
+                    None,
+                    None,
+                    ctx,
+                );
+                self.add_session(
+                    Direction::Down,
+                    Some(top_right.into()),
+                    Some(top_right),
+                    None,
+                    None,
+                    ctx,
+                );
+            }
+        }
+
+        self.run_terminal_layout_agent_mode(agent_mode, ctx);
+        true
+    }
+
+    fn run_terminal_layout_agent_mode(
+        &self,
+        agent_mode: TerminalLayoutAgentMode,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(agent) = agent_mode.cli_agent() else {
+            return;
+        };
+        let command = agent.command_prefix();
+        let terminal_views = self
+            .panes
+            .visible_pane_ids()
+            .into_iter()
+            .filter_map(|pane_id| self.terminal_view_from_pane_id(pane_id, ctx))
+            .collect::<Vec<_>>();
+
+        for terminal_view in terminal_views {
+            terminal_view.update(ctx, |terminal_view, ctx| {
+                terminal_view.execute_command_or_set_pending(command, ctx);
+            });
+        }
     }
 
     fn session_path(&self, pane_id: &TerminalPaneId, ctx: &AppContext) -> Option<PathBuf> {

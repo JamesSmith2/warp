@@ -601,14 +601,13 @@ impl CodeDiffView {
         #[cfg_attr(not(windows), allow(unused_variables))]
         ctx.subscribe_to_view(&editor, |me, view, event, ctx| match event {
             CodeEditorEvent::Focused => ctx.emit(CodeDiffViewEvent::EditorFocused),
-            CodeEditorEvent::SelectionChanged => {
+            CodeEditorEvent::SelectionChanged
                 // The `is_some` check is necessary because `CodeEditorEvent::SelectionChanged` is
                 // also emitted when the editor's selection is cleared via external means
                 // (i.e. when a text selection is made outside the `CodeEditorView`).
-                if view.as_ref(ctx).selected_text(ctx).is_some() {
+                if view.as_ref(ctx).selected_text(ctx).is_some() => {
                     ctx.emit(CodeDiffViewEvent::TextSelected);
                 }
-            }
             CodeEditorEvent::CopiedEmptyText => {
                 ctx.emit(CodeDiffViewEvent::CopiedEmptyText);
             }

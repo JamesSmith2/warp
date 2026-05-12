@@ -84,20 +84,20 @@ impl ActiveNotebookData {
 
     fn handle_cloud_model_event(&mut self, event: &CloudModelEvent, ctx: &mut ModelContext<Self>) {
         match event {
-            CloudModelEvent::NotebookEditorChangedFromServer { notebook_id } => {
-                if self.is_active_notebook(*notebook_id) {
-                    if let Some(new_editor) =
-                        CloudViewModel::as_ref(ctx).object_current_editor(&notebook_id.uid(), ctx)
+            CloudModelEvent::NotebookEditorChangedFromServer { notebook_id }
+                if self.is_active_notebook(*notebook_id) =>
+            {
+                if let Some(new_editor) =
+                    CloudViewModel::as_ref(ctx).object_current_editor(&notebook_id.uid(), ctx)
+                {
+                    if self.mode == Mode::Editing
+                        && matches!(new_editor.state, EditorState::OtherUserActive)
                     {
-                        if self.mode == Mode::Editing
-                            && matches!(new_editor.state, EditorState::OtherUserActive)
-                        {
-                            self.mode = Mode::View;
-                            ctx.emit(ActiveNotebookDataEvent::ModeChangedFromServer);
-                        }
+                        self.mode = Mode::View;
+                        ctx.emit(ActiveNotebookDataEvent::ModeChangedFromServer);
                     }
-                    ctx.notify();
                 }
+                ctx.notify();
             }
             CloudModelEvent::ObjectMoved { type_and_id, .. } => {
                 if let Some(notebook_id) = type_and_id.as_notebook_id() {

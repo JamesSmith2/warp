@@ -3466,10 +3466,10 @@ impl TerminalView {
                     );
                     ctx.notify();
                 }
-                TerminalSettingsChangedEvent::AltScreenPadding { .. } => {
-                    if me.model.lock().is_alt_screen_active() {
-                        me.refresh_size(ctx);
-                    }
+                TerminalSettingsChangedEvent::AltScreenPadding { .. }
+                    if me.model.lock().is_alt_screen_active() =>
+                {
+                    me.refresh_size(ctx);
                 }
                 _ => {}
             },
@@ -10601,7 +10601,7 @@ impl TerminalView {
                                                     view_id,
                                                     CLIAgentSession {
                                                         agent,
-                                                        status: CLIAgentSessionStatus::InProgress,
+                                                        status: CLIAgentSessionStatus::Idle,
                                                         session_context:
                                                             CLIAgentSessionContext::default(),
                                                         input_state: CLIAgentInputState::Closed,
@@ -11931,25 +11931,25 @@ impl TerminalView {
         match event {
             CLIAgentSessionsModelEvent::Started {
                 terminal_view_id, ..
-            } if *terminal_view_id == self.view_id => {
-                if FeatureFlag::TrimTrailingBlankLines.is_enabled() {
-                    self.model
-                        .lock()
-                        .block_list_mut()
-                        .active_block_mut()
-                        .set_trim_trailing_blank_rows(true);
-                }
+            } if *terminal_view_id == self.view_id
+                && FeatureFlag::TrimTrailingBlankLines.is_enabled() =>
+            {
+                self.model
+                    .lock()
+                    .block_list_mut()
+                    .active_block_mut()
+                    .set_trim_trailing_blank_rows(true);
             }
             CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id, ..
-            } if *terminal_view_id == self.view_id => {
-                if FeatureFlag::TrimTrailingBlankLines.is_enabled() {
-                    self.model
-                        .lock()
-                        .block_list_mut()
-                        .active_block_mut()
-                        .set_trim_trailing_blank_rows(false);
-                }
+            } if *terminal_view_id == self.view_id
+                && FeatureFlag::TrimTrailingBlankLines.is_enabled() =>
+            {
+                self.model
+                    .lock()
+                    .block_list_mut()
+                    .active_block_mut()
+                    .set_trim_trailing_blank_rows(false);
             }
             _ => {}
         }
@@ -11980,12 +11980,15 @@ impl TerminalView {
             return;
         }
 
-        if let Some(conversation_id) = self.child_conversation_id_for_cli_status_updates(ctx) {
+        if let (Some(conversation_id), Some(conversation_status)) = (
+            self.child_conversation_id_for_cli_status_updates(ctx),
+            status.to_conversation_status(),
+        ) {
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
                 history_model.update_conversation_status(
                     self.view_id,
                     conversation_id,
-                    status.to_conversation_status(),
+                    conversation_status,
                     ctx,
                 );
             });
@@ -12018,13 +12021,17 @@ impl TerminalView {
                             self.open_cli_agent_rich_input(CLIAgentInputEntrypoint::AutoShow, ctx);
                         }
                     }
+                    CLIAgentSessionStatus::Idle => {}
                 }
             }
         }
 
         // Desktop notifications — only when navigated away and not in-progress.
         if !self.is_navigated_away_from_window(ctx)
-            || matches!(status, CLIAgentSessionStatus::InProgress)
+            || matches!(
+                status,
+                CLIAgentSessionStatus::Idle | CLIAgentSessionStatus::InProgress
+            )
         {
             return;
         }
@@ -13684,7 +13691,7 @@ impl TerminalView {
             correct_command(
                 command,
                 &session_metadata,
-                DEFAULT_IGNORED_RULES_FOR_COMMAND_CORRECTIONS.into_iter(),
+                *DEFAULT_IGNORED_RULES_FOR_COMMAND_CORRECTIONS,
             )
         }
     }
@@ -21466,13 +21473,12 @@ impl TerminalView {
                 // determines if we need git status updates.
                 self.update_git_status_subscription(ctx);
             }
-            SessionSettingsChangedEvent::CLIAgentToolbarChipSelectionSetting { .. } => {
+            SessionSettingsChangedEvent::CLIAgentToolbarChipSelectionSetting { .. }
                 // Force-close rich input when the Rich Input chip is removed so
                 // it doesn't linger open with no toolbar button to manage it.
-                if !is_rich_input_chip_in_cli_toolbar(ctx) {
+                if !is_rich_input_chip_in_cli_toolbar(ctx) => {
                     self.close_cli_agent_rich_input(CLIAgentRichInputCloseReason::Other, ctx);
                 }
-            }
             _ => {}
         }
     }

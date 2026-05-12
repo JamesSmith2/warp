@@ -381,7 +381,7 @@ pub(crate) fn apply_cli_agent_state_update(
                         view_id,
                         CLIAgentSession {
                             agent,
-                            status: CLIAgentSessionStatus::InProgress,
+                            status: CLIAgentSessionStatus::Idle,
                             session_context: CLIAgentSessionContext::default(),
                             input_state: CLIAgentInputState::Closed,
                             listener: None,

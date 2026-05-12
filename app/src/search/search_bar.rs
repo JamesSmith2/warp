@@ -284,31 +284,31 @@ impl<T: Action + Clone> SearchBarState<T> {
                 }
                 // If no interactable item found, keep current selection
             }
-            (SelectionUpdate::Bottom, _, Some(query_result_renderers)) => {
-                if !query_result_renderers.is_empty() {
-                    // Adjust the index, wrapping around if necessary.
-                    let len = query_result_renderers.len() as isize;
-                    let new_index =
-                        (len - 1 + self.offset_initial_selection_by).rem_euclid(len) as usize;
-                    if self.selected_index != Some(new_index) {
-                        self.selected_index = Some(new_index);
-                        ctx.emit(SearchBarEvent::ResultSelected { index: new_index });
-                        ctx.notify();
-                    }
+            (SelectionUpdate::Bottom, _, Some(query_result_renderers))
+                if !query_result_renderers.is_empty() =>
+            {
+                // Adjust the index, wrapping around if necessary.
+                let len = query_result_renderers.len() as isize;
+                let new_index =
+                    (len - 1 + self.offset_initial_selection_by).rem_euclid(len) as usize;
+                if self.selected_index != Some(new_index) {
+                    self.selected_index = Some(new_index);
+                    ctx.emit(SearchBarEvent::ResultSelected { index: new_index });
+                    ctx.notify();
                 }
             }
-            (SelectionUpdate::Top, _, Some(query_result_renderers)) => {
-                if !query_result_renderers.is_empty() {
-                    // Adjust the index, wrapping around if necessary.
-                    let new_index = self
-                        .offset_initial_selection_by
-                        .rem_euclid(query_result_renderers.len() as isize)
-                        as usize;
-                    if self.selected_index != Some(new_index) {
-                        self.selected_index = Some(new_index);
-                        ctx.emit(SearchBarEvent::ResultSelected { index: new_index });
-                        ctx.notify();
-                    }
+            (SelectionUpdate::Top, _, Some(query_result_renderers))
+                if !query_result_renderers.is_empty() =>
+            {
+                // Adjust the index, wrapping around if necessary.
+                let new_index = self
+                    .offset_initial_selection_by
+                    .rem_euclid(query_result_renderers.len() as isize)
+                    as usize;
+                if self.selected_index != Some(new_index) {
+                    self.selected_index = Some(new_index);
+                    ctx.emit(SearchBarEvent::ResultSelected { index: new_index });
+                    ctx.notify();
                 }
             }
             (SelectionUpdate::Clear, _, _) => {
@@ -462,17 +462,16 @@ impl<T: Action + Clone> SearchBar<T> {
                 self.handle_editor_text_update(ctx);
             }
             // TODO(vorporeal): Implement real support for placeholder text.
-            EditorEvent::AutosuggestionAccepted { .. } => {
+            EditorEvent::AutosuggestionAccepted { .. }
                 // Autosuggestions can be accepted by pressing right arrow when they are
                 // visible.  In the command search view, they're only visible when the
                 // buffer is empty, so if the user accepts one, immediately re-clear the
                 // buffer (to effectively revert the event).
-                if self.state.as_ref(ctx).should_show_zero_state {
+                if self.state.as_ref(ctx).should_show_zero_state => {
                     self.editor_handle.update(ctx, |editor, ctx| {
                         editor.clear_buffer_and_reset_undo_stack(ctx);
                     });
                 }
-            }
             EditorEvent::Navigate(NavigationKey::Up) => {
                 self.handle_selection_update(SelectionUpdate::Up, ctx);
             }
@@ -516,12 +515,11 @@ impl<T: Action + Clone> SearchBar<T> {
             EditorEvent::CtrlC {
                 cleared_buffer_len: buffer_len,
             } => self.buffer_cleared(ctx, *buffer_len),
-            EditorEvent::BackspaceOnEmptyBuffer => {
+            EditorEvent::BackspaceOnEmptyBuffer
                 // Only clear filter on backspace if it's a user-modifiable state
-                if self.filterable(ctx) {
+                if self.filterable(ctx) => {
                     self.set_visible_query_filter(None, ctx);
                 }
-            }
             EditorEvent::Navigate(NavigationKey::Tab) => {
                 self.handle_editor_tab(ctx);
             }

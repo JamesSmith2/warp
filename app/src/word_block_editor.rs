@@ -253,12 +253,10 @@ impl WordBlockEditorView {
                 ctx.emit(WordBlockEditorViewEvent::WordListValidityChanged);
                 ctx.notify();
             }
-            Event::BackspaceOnEmptyBuffer => {
-                if !self.list_of_words.is_empty() {
-                    self.list_of_words.pop();
-                    ctx.emit(WordBlockEditorViewEvent::WordListValidityChanged);
-                    ctx.notify();
-                }
+            Event::BackspaceOnEmptyBuffer if !self.list_of_words.is_empty() => {
+                self.list_of_words.pop();
+                ctx.emit(WordBlockEditorViewEvent::WordListValidityChanged);
+                ctx.notify();
             }
             Event::Escape => ctx.emit(WordBlockEditorViewEvent::Escape),
             Event::Enter => ctx.emit(WordBlockEditorViewEvent::Enter),

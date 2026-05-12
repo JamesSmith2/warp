@@ -191,7 +191,7 @@ impl CanonicalRunState {
                 cli_session: Some(CLISessionInputs {
                     agent: CLIAgent::Claude,
                     has_listener: true,
-                    status: ConversationStatus::InProgress,
+                    status: Some(ConversationStatus::InProgress),
                     supports_rich_status: true,
                 }),
                 ambient_selected_third_party_cli_agent: None,
@@ -203,9 +203,9 @@ impl CanonicalRunState {
                 cli_session: Some(CLISessionInputs {
                     agent: CLIAgent::Claude,
                     has_listener: true,
-                    status: ConversationStatus::Blocked {
+                    status: Some(ConversationStatus::Blocked {
                         blocked_action: String::new(),
-                    },
+                    }),
                     supports_rich_status: true,
                 }),
                 ambient_selected_third_party_cli_agent: None,
@@ -217,7 +217,7 @@ impl CanonicalRunState {
                 cli_session: Some(CLISessionInputs {
                     agent: CLIAgent::Claude,
                     has_listener: false,
-                    status: ConversationStatus::InProgress,
+                    status: Some(ConversationStatus::InProgress),
                     supports_rich_status: false,
                 }),
                 ambient_selected_third_party_cli_agent: None,

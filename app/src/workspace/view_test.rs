@@ -20,7 +20,9 @@ use crate::gpu_state::GPUState;
 use crate::network::NetworkStatus;
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::notebooks::notebook::NotebookView;
-use crate::pane_group::{Direction, PaneGroupAction, PaneId};
+use crate::pane_group::{
+    Direction, PaneGroupAction, PaneId, TerminalLayoutAgentMode, TerminalLayoutPreset,
+};
 use crate::pricing::PricingInfoModel;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 #[cfg(feature = "local_fs")]
@@ -2609,6 +2611,381 @@ fn test_window_workspace_groups_scope_visible_tabs() {
 }
 
 #[test]
+fn test_window_workspace_groups_new_group_opens_terminal_layout_chooser() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .visible_pane_count(),
+                2
+            );
+
+            workspace.handle_action(
+                &WorkspaceAction::ApplyTerminalLayoutToActiveWorkspaceGroup {
+                    preset: TerminalLayoutPreset::Single,
+                    agent_mode: TerminalLayoutAgentMode::None,
+                },
+                ctx,
+            );
+
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            assert_eq!(pane_group.visible_pane_count(), 1);
+            assert!(pane_group.terminal_view_at_pane_index(0, ctx).is_some());
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_top_new_tab_opens_terminal_layout_chooser() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+    let _welcome_tab_guard = FeatureFlag::WelcomeTab.override_enabled(false);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddDefaultTab, ctx);
+
+            assert_eq!(workspace.tab_count(), 2);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .visible_pane_count(),
+                2
+            );
+
+            workspace.handle_action(
+                &WorkspaceAction::ApplyTerminalLayoutToActiveWorkspaceGroup {
+                    preset: TerminalLayoutPreset::Grid2x2,
+                    agent_mode: TerminalLayoutAgentMode::None,
+                },
+                ctx,
+            );
+
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            assert_eq!(pane_group.visible_pane_count(), 4);
+            for index in 0..4 {
+                assert!(pane_group.terminal_view_at_pane_index(index, ctx).is_some());
+            }
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_terminal_menu_new_tab_opens_terminal_layout_chooser() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::AddTerminalTab {
+                    hide_homepage: false,
+                },
+                ctx,
+            );
+
+            assert_eq!(workspace.tab_count(), 2);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .visible_pane_count(),
+                2
+            );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_hidden_homepage_new_tab_skips_terminal_layout_chooser() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::AddTerminalTab {
+                    hide_homepage: true,
+                },
+                ctx,
+            );
+
+            assert_eq!(workspace.tab_count(), 2);
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .visible_pane_count(),
+                1
+            );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_context_menu_opens_terminal_layout_chooser() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.show_workspace_group_context_menu(0, Vector2F::zero(), ctx);
+            let labels = workspace.workspace_group_context_menu.read(ctx, |menu, _| {
+                menu.items()
+                    .iter()
+                    .filter_map(|item| match item {
+                        MenuItem::Item(fields) => Some(fields.label().to_string()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert!(labels
+                .iter()
+                .any(|label| label == "Choose terminal layout..."));
+
+            workspace.handle_action(
+                &WorkspaceAction::OpenWorkspaceGroupTerminalLayoutChooser(0),
+                ctx,
+            );
+            assert_eq!(
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .visible_pane_count(),
+                2
+            );
+
+            workspace.show_workspace_group_context_menu(0, Vector2F::zero(), ctx);
+            let labels = workspace.workspace_group_context_menu.read(ctx, |menu, _| {
+                menu.items()
+                    .iter()
+                    .filter_map(|item| match item {
+                        MenuItem::Item(fields) => Some(fields.label().to_string()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert!(!labels
+                .iter()
+                .any(|label| label == "Choose terminal layout..."));
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_terminal_layout_presets_preserve_first_terminal() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        for (preset, expected_pane_count) in [
+            (TerminalLayoutPreset::Single, 1),
+            (TerminalLayoutPreset::TwoColumns, 2),
+            (TerminalLayoutPreset::TwoRows, 2),
+            (TerminalLayoutPreset::ThreeColumns, 3),
+            (TerminalLayoutPreset::Grid2x2, 4),
+        ] {
+            let workspace = mock_workspace(&mut app);
+            workspace.update(&mut app, |workspace, ctx| {
+                let original_pane_id = workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .pane_id_by_index(0)
+                    .expect("initial workspace should have one terminal pane");
+
+                workspace.handle_action(
+                    &WorkspaceAction::ApplyTerminalLayoutToActiveWorkspaceGroup {
+                        preset,
+                        agent_mode: TerminalLayoutAgentMode::None,
+                    },
+                    ctx,
+                );
+
+                let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+                assert_eq!(pane_group.visible_pane_count(), expected_pane_count);
+                assert_eq!(pane_group.pane_id_by_index(0), Some(original_pane_id));
+                for index in 0..expected_pane_count {
+                    assert!(pane_group.terminal_view_at_pane_index(index, ctx).is_some());
+                }
+            });
+        }
+    });
+}
+
+fn active_terminal_input_buffers(workspace: &Workspace, ctx: &AppContext) -> Vec<String> {
+    let terminal_views = {
+        let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+        (0..pane_group.visible_pane_count())
+            .map(|index| {
+                pane_group
+                    .terminal_view_at_pane_index(index, ctx)
+                    .expect("expected terminal at pane index")
+            })
+            .collect::<Vec<_>>()
+    };
+
+    terminal_views
+        .iter()
+        .map(|terminal_view| {
+            terminal_view
+                .as_ref(ctx)
+                .input()
+                .as_ref(ctx)
+                .buffer_text(ctx)
+        })
+        .collect()
+}
+
+#[test]
+fn test_window_workspace_groups_terminal_layout_agent_none_leaves_inputs_empty() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::ApplyTerminalLayoutToActiveWorkspaceGroup {
+                    preset: TerminalLayoutPreset::TwoColumns,
+                    agent_mode: TerminalLayoutAgentMode::None,
+                },
+                ctx,
+            );
+
+            assert_eq!(
+                active_terminal_input_buffers(workspace, ctx),
+                vec!["".to_string(), "".to_string()]
+            );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_terminal_layout_agent_claude_runs_in_all_panes() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::ApplyTerminalLayoutToActiveWorkspaceGroup {
+                    preset: TerminalLayoutPreset::Grid2x2,
+                    agent_mode: TerminalLayoutAgentMode::Claude,
+                },
+                ctx,
+            );
+
+            assert_eq!(
+                active_terminal_input_buffers(workspace, ctx),
+                vec![
+                    "claude".to_string(),
+                    "claude".to_string(),
+                    "claude".to_string(),
+                    "claude".to_string()
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_terminal_layout_agent_codex_runs_in_all_panes() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::ApplyTerminalLayoutToActiveWorkspaceGroup {
+                    preset: TerminalLayoutPreset::TwoColumns,
+                    agent_mode: TerminalLayoutAgentMode::Codex,
+                },
+                ctx,
+            );
+
+            assert_eq!(
+                active_terminal_input_buffers(workspace, ctx),
+                vec!["codex".to_string(), "codex".to_string()]
+            );
+        });
+    });
+}
+
+#[test]
 fn test_window_workspace_groups_close_last_tab_replaces_session() {
     let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
 
@@ -2774,6 +3151,98 @@ fn test_window_workspace_groups_close_requires_confirmation() {
 
             assert_eq!(workspace.workspace_group_count(), 1);
             assert_eq!(workspace.active_workspace_group_index(), 0);
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_clear_requires_confirmation() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            assert_eq!(workspace.workspace_group_count(), 2);
+
+            workspace.handle_action(&WorkspaceAction::ClearWorkspaces, ctx);
+            assert!(workspace
+                .current_workspace_state
+                .is_clear_workspaces_confirmation_dialog_open);
+            assert_eq!(workspace.workspace_group_count(), 2);
+
+            workspace.handle_clear_workspaces_confirmation_dialog_event(
+                &crate::workspace::clear_workspaces_confirmation_dialog::ClearWorkspacesConfirmationEvent::Cancel,
+                ctx,
+            );
+            assert!(!workspace
+                .current_workspace_state
+                .is_clear_workspaces_confirmation_dialog_open);
+            assert_eq!(workspace.workspace_group_count(), 2);
+        });
+    });
+}
+
+#[test]
+fn test_window_workspace_groups_clear_resets_all_workspace_windows() {
+    let _workspace_groups_guard = FeatureFlag::WindowWorkspaceGroups.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_window_workspace_groups.set_value(true, ctx));
+            });
+        });
+
+        let workspace_one = mock_workspace(&mut app);
+        let workspace_two = mock_workspace(&mut app);
+        let preview_workspace = mock_workspace(&mut app);
+
+        workspace_one.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            assert_eq!(workspace.workspace_group_count(), 2);
+        });
+        workspace_two.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            assert_eq!(workspace.workspace_group_count(), 2);
+        });
+        preview_workspace.update(&mut app, |workspace, ctx| {
+            workspace.set_is_tab_drag_preview(true);
+            workspace.handle_action(&WorkspaceAction::AddWorkspaceGroup, ctx);
+            assert_eq!(workspace.workspace_group_count(), 2);
+        });
+
+        workspace_one.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::ClearWorkspaces, ctx);
+            workspace.handle_clear_workspaces_confirmation_dialog_event(
+                &crate::workspace::clear_workspaces_confirmation_dialog::ClearWorkspacesConfirmationEvent::ClearWithoutExport,
+                ctx,
+            );
+        });
+
+        workspace_one.read(&app, |workspace, _| {
+            assert_eq!(workspace.workspace_group_count(), 1);
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.tab_count(), 1);
+        });
+        workspace_two.read(&app, |workspace, _| {
+            assert_eq!(workspace.workspace_group_count(), 1);
+            assert_eq!(workspace.active_workspace_group_index(), 0);
+            assert_eq!(workspace.tab_count(), 1);
+        });
+        preview_workspace.read(&app, |workspace, _| {
+            assert_eq!(workspace.workspace_group_count(), 2);
+            assert_eq!(workspace.active_workspace_group_index(), 1);
+            assert_eq!(workspace.tab_count(), 1);
         });
     });
 }
@@ -3021,7 +3490,7 @@ fn test_window_workspace_groups_detects_running_activity_in_inactive_group() {
                     inactive_terminal_view_id,
                     CLIAgentSession {
                         agent: CLIAgent::Codex,
-                        status: CLIAgentSessionStatus::InProgress,
+                        status: CLIAgentSessionStatus::Idle,
                         session_context: CLIAgentSessionContext::default(),
                         input_state: CLIAgentInputState::Closed,
                         should_auto_toggle_input: false,
@@ -3036,11 +3505,11 @@ fn test_window_workspace_groups_detects_running_activity_in_inactive_group() {
             });
 
             assert!(
-                workspace.workspace_group_has_running_terminal_activity(0, ctx),
-                "a detected non-rich CLI agent session should animate while its terminal command is still running"
+                !workspace.workspace_group_has_running_terminal_activity(0, ctx),
+                "a detected non-rich CLI agent session should stay idle until a turn starts"
             );
             assert!(!workspace.workspace_group_has_running_terminal_activity(1, ctx));
-            assert!(workspace.has_workspace_group_running_terminal_activity(ctx));
+            assert!(!workspace.has_workspace_group_running_terminal_activity(ctx));
 
             CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
                 sessions.update_from_event(

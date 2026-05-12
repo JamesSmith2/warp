@@ -884,7 +884,7 @@ async fn upload_gathered_snapshot(
                 chunk.len(),
             );
         }
-        for (file, target) in chunk.iter().zip(targets.into_iter()) {
+        for (file, target) in chunk.iter().zip(targets) {
             target_map.insert(file.filename.clone(), target);
         }
     }

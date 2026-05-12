@@ -109,13 +109,13 @@ pub struct CodexHarnessConfig {
 
 impl CodexHarnessConfig {
     pub fn is_empty(&self) -> bool {
-        self.base_url.as_deref().map_or(true, str::is_empty)
-            && self.model.as_deref().map_or(true, str::is_empty)
+        self.base_url.as_deref().is_none_or(str::is_empty)
+            && self.model.as_deref().is_none_or(str::is_empty)
             && self
                 .api_key_secret_name
                 .as_deref()
-                .map_or(true, str::is_empty)
-            && self.local_api_key.as_deref().map_or(true, str::is_empty)
+                .is_none_or(str::is_empty)
+            && self.local_api_key.as_deref().is_none_or(str::is_empty)
     }
 
     pub fn normalized(mut self) -> Self {

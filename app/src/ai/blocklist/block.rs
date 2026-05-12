@@ -2270,17 +2270,15 @@ impl AIBlock {
                             description,
                         }),
                     ..
-                } => {
-                    if !self.model.is_restored() {
-                        self.handle_unit_test_suggestion_complete(
-                            id,
-                            output.server_output_id.as_ref(),
-                            query.clone(),
-                            title.clone(),
-                            description.clone(),
-                            ctx,
-                        );
-                    }
+                } if !self.model.is_restored() => {
+                    self.handle_unit_test_suggestion_complete(
+                        id,
+                        output.server_output_id.as_ref(),
+                        query.clone(),
+                        title.clone(),
+                        description.clone(),
+                        ctx,
+                    );
                 }
                 AIAgentAction {
                     id,
@@ -2291,16 +2289,14 @@ impl AIBlock {
                             base_branch,
                         },
                     ..
-                } => {
-                    if self.model.is_restored() && FeatureFlag::PRCommentsV2.is_enabled() {
-                        self.handle_insert_code_review_comments(
-                            id.clone(),
-                            repo_path,
-                            comments,
-                            base_branch.as_deref(),
-                            ctx,
-                        );
-                    }
+                } if self.model.is_restored() && FeatureFlag::PRCommentsV2.is_enabled() => {
+                    self.handle_insert_code_review_comments(
+                        id.clone(),
+                        repo_path,
+                        comments,
+                        base_branch.as_deref(),
+                        ctx,
+                    );
                 }
                 _ => (),
             }
@@ -2681,18 +2677,17 @@ impl AIBlock {
                     ctx.notify();
                 });
                 ctx.subscribe_to_view(&view, |me, view, event, ctx| match event {
-                    CodeEditorEvent::SelectionChanged => {
+                    CodeEditorEvent::SelectionChanged
                         // If there's an ongoing text selection, clear all other selections within the
                         // `AIBlock`'s view sub-hierarchy to ensure only one component has a selection at a time.
                         //
                         // The `is_some` check is necessary because `CodeEditorEvent::SelectionChanged` is
                         // also emitted when the editor's selection is cleared via external means
                         // (i.e. when a text selection is made outside the `CodeEditorView`).
-                        if view.as_ref(ctx).selected_text(ctx).is_some() {
+                        if view.as_ref(ctx).selected_text(ctx).is_some() => {
                             me.clear_other_selections(Some(view.id()), ctx.window_id(), ctx);
                             ctx.emit(AIBlockEvent::ChildViewTextSelected);
                         }
-                    }
                     CodeEditorEvent::CopiedEmptyText => {
                         ctx.emit(AIBlockEvent::CopiedEmptyText);
                     }
@@ -2916,10 +2911,10 @@ impl AIBlock {
                         entrypoint: *entrypoint,
                     });
                 }
-                CodeDiffViewEvent::LoadedDiffs => {
-                    if me.model.request_type(ctx).is_passive_code_diff() {
-                        ctx.emit(AIBlockEvent::PassiveCodeDiffLoaded);
-                    }
+                CodeDiffViewEvent::LoadedDiffs
+                    if me.model.request_type(ctx).is_passive_code_diff() =>
+                {
+                    ctx.emit(AIBlockEvent::PassiveCodeDiffLoaded);
                 }
                 #[cfg_attr(not(feature = "local_fs"), allow(unused_variables))]
                 CodeDiffViewEvent::OpenSkill { reference, path } => {

@@ -176,6 +176,8 @@ pub fn test_launch_config_single_child_branch() -> Builder {
             active_window_index: Some(0),
             windows: vec![WindowTemplate {
                 active_tab_index: Some(0),
+                active_workspace_group_index: None,
+                workspace_groups: vec![],
                 tabs: vec![TabTemplate {
                     title: Some("First tab".to_owned()),
                     layout: PaneTemplateType::PaneBranchTemplate {
@@ -304,6 +306,8 @@ pub fn test_with_launch_config_with_active_tab_index() -> Builder {
             active_window_index: Some(0),
             windows: vec![WindowTemplate {
                 active_tab_index: Some(1),
+                active_workspace_group_index: None,
+                workspace_groups: vec![],
                 tabs: vec![
                     TabTemplate {
                         title: None,
@@ -363,6 +367,8 @@ pub fn test_with_launch_config_with_active_pane() -> Builder {
             active_window_index: Some(0),
             windows: vec![WindowTemplate {
                 active_tab_index: Some(0),
+                active_workspace_group_index: None,
+                workspace_groups: vec![],
                 tabs: vec![TabTemplate {
                     title: None,
                     layout: PaneTemplateType::PaneBranchTemplate {
@@ -441,6 +447,8 @@ pub fn test_with_launch_config_with_no_active_pane() -> Builder {
             active_window_index: Some(0),
             windows: vec![WindowTemplate {
                 active_tab_index: Some(0),
+                active_workspace_group_index: None,
+                workspace_groups: vec![],
                 tabs: vec![TabTemplate {
                     title: None,
                     layout: PaneTemplateType::PaneBranchTemplate {

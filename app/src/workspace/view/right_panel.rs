@@ -1145,10 +1145,8 @@ impl RightPanelView {
 
         ctx.subscribe_to_view(&code_review_view, |me, code_review, event, ctx| {
             match event {
-                CodeReviewViewEvent::ReviewSubmitted => {
-                    if me.is_maximized(ctx) {
-                        me.handle_action(&RightPanelAction::ToggleMaximize, ctx);
-                    }
+                CodeReviewViewEvent::ReviewSubmitted if me.is_maximized(ctx) => {
+                    me.handle_action(&RightPanelAction::ToggleMaximize, ctx);
                 }
                 CodeReviewViewEvent::SubmitReviewComments {
                     comments,
