@@ -6,6 +6,11 @@ use crate::terminal::cli_agent_sessions::event::{CLIAgentEventPayload, CLIAgentE
 use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 use crate::terminal::CLIAgent;
 
+struct ParsedCLIAgentEvent {
+    event: CLIAgentEvent,
+    provides_rich_status: bool,
+}
+
 /// Per-agent handler that filters and transforms parsed CLI agent events.
 /// Each CLI agent can have a different implementation depending on which events
 /// it cares about.
@@ -14,8 +19,11 @@ trait CLIAgentSessionHandler {
     /// The default implementation delegates to the structured JSON parser
     /// (`parse_event`); agents with non-JSON notification formats (e.g. Codex
     /// OSC 9 plain text) should override this.
-    fn try_parse(&self, title: Option<&str>, body: &str) -> Option<CLIAgentEvent> {
-        parse_event(title, body)
+    fn try_parse(&self, title: Option<&str>, body: &str) -> Option<ParsedCLIAgentEvent> {
+        parse_event(title, body).map(|event| ParsedCLIAgentEvent {
+            event,
+            provides_rich_status: true,
+        })
     }
 
     /// Decide whether a parsed event should be forwarded to the sessions model.
@@ -88,14 +96,12 @@ impl CLIAgentSessionHandler for DefaultSessionListener {
     }
 }
 
-/// Codex-specific handler that parses plain-text OSC 9 desktop notifications
-/// into CLI agent events.
+/// Codex-specific handler that parses Codex turn notifications into CLI agent
+/// events.
 ///
-/// Codex sends notifications via OSC 9 (`\x1b]9;message\x07`) with
-/// human-readable text. Most notifications are completion-style messages and
-/// are treated as `Stop` (success), but Codex also emits `Received.` when it
-/// accepts a prompt. That message marks the session as in-progress again so
-/// workspace activity reflects the active turn rather than the still-open TUI.
+/// Modern Codex setups use hooks to emit Warp's structured OSC 777
+/// `warp://cli-agent` events. The plain OSC 9 path is retained for older Codex
+/// versions that only send human-readable notifications.
 struct CodexSessionHandler;
 
 impl CodexSessionHandler {
@@ -129,20 +135,21 @@ impl CodexSessionHandler {
 }
 
 impl CLIAgentSessionHandler for CodexSessionHandler {
-    /// Codex sends plain-text OSC 9 notifications (title = `None`) instead of
-    /// the structured OSC 777 JSON used by Claude Code / OpenCode.
-    fn try_parse(&self, title: Option<&str>, body: &str) -> Option<CLIAgentEvent> {
-        // If the notification carries the structured sentinel, try the normal
-        // JSON parser first (future-proofing in case Codex adds plugin
-        // support later).
+    fn try_parse(&self, title: Option<&str>, body: &str) -> Option<ParsedCLIAgentEvent> {
         if let Some(parsed) = parse_event(title, body) {
-            return Some(parsed);
+            return Some(ParsedCLIAgentEvent {
+                event: parsed,
+                provides_rich_status: true,
+            });
         }
         // OSC 9 notifications have no title.
         if title.is_some() {
             return None;
         }
-        Self::parse_osc9_text(body)
+        Self::parse_osc9_text(body).map(|event| ParsedCLIAgentEvent {
+            event,
+            provides_rich_status: false,
+        })
     }
 
     fn handle_event(&mut self, event: CLIAgentEvent) -> Option<CLIAgentEvent> {
@@ -184,9 +191,15 @@ impl CLIAgentSessionListener {
                 let Some(parsed) = me.inner.try_parse(title.as_deref(), body) else {
                     return;
                 };
-                if let Some(event) = me.inner.handle_event(parsed) {
+                let provides_rich_status = parsed.provides_rich_status;
+                if let Some(event) = me.inner.handle_event(parsed.event) {
                     CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions_model, ctx| {
-                        sessions_model.update_from_event(me.terminal_view_id, &event, ctx);
+                        sessions_model.update_from_event_with_status_source(
+                            me.terminal_view_id,
+                            &event,
+                            provides_rich_status,
+                            ctx,
+                        );
                     });
                 }
             }
@@ -264,7 +277,48 @@ mod tests {
     fn codex_try_parse_handles_osc9() {
         let handler = CodexSessionHandler;
         let event = handler.try_parse(None, "Agent turn complete").unwrap();
-        assert_eq!(event.event, CLIAgentEventType::Stop);
+        assert_eq!(event.event.event, CLIAgentEventType::Stop);
+        assert!(!event.provides_rich_status);
+    }
+
+    #[test]
+    fn codex_try_parse_handles_structured_prompt_submit_hook() {
+        let handler = CodexSessionHandler;
+        let event = handler
+            .try_parse(
+                Some(crate::terminal::cli_agent_sessions::event::CLI_AGENT_NOTIFICATION_SENTINEL),
+                r#"{"v":1,"agent":"codex","event":"prompt_submit"}"#,
+            )
+            .unwrap();
+
+        assert_eq!(event.event.event, CLIAgentEventType::PromptSubmit);
+        assert_eq!(event.event.agent, CLIAgent::Codex);
+        assert!(event.provides_rich_status);
+    }
+
+    #[test]
+    fn codex_try_parse_handles_structured_stop_hook() {
+        let handler = CodexSessionHandler;
+        let event = handler
+            .try_parse(
+                Some(crate::terminal::cli_agent_sessions::event::CLI_AGENT_NOTIFICATION_SENTINEL),
+                r#"{"v":1,"agent":"codex","event":"stop"}"#,
+            )
+            .unwrap();
+
+        assert_eq!(event.event.event, CLIAgentEventType::Stop);
+        assert_eq!(event.event.agent, CLIAgent::Codex);
+        assert!(event.provides_rich_status);
+    }
+
+    #[test]
+    fn codex_try_parse_marks_osc9_as_non_rich_status() {
+        let handler = CodexSessionHandler;
+        let event = handler.try_parse(None, "Received.").unwrap();
+
+        assert_eq!(event.event.event, CLIAgentEventType::PromptSubmit);
+        assert_eq!(event.event.agent, CLIAgent::Codex);
+        assert!(!event.provides_rich_status);
     }
 
     #[test]

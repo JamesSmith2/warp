@@ -115,6 +115,49 @@ fn parse_session_start_notification() {
 }
 
 #[test]
+fn parse_codex_prompt_submit_notification() {
+    let body = r#"{"v":1,"agent":"codex","event":"prompt_submit","session_id":"abc","cwd":"/tmp/proj","project":"proj"}"#;
+    let notif = parse_event(Some("warp://cli-agent"), body).unwrap();
+
+    assert_eq!(notif.agent, CLIAgent::Codex);
+    assert_eq!(notif.event, CLIAgentEventType::PromptSubmit);
+    assert_eq!(notif.session_id.as_deref(), Some("abc"));
+    assert_eq!(notif.cwd.as_deref(), Some("/tmp/proj"));
+    assert_eq!(notif.project.as_deref(), Some("proj"));
+}
+
+#[test]
+fn parse_codex_stop_notification() {
+    let body = r#"{"v":1,"agent":"codex","event":"stop","session_id":"abc","cwd":"/tmp/proj","project":"proj"}"#;
+    let notif = parse_event(Some("warp://cli-agent"), body).unwrap();
+
+    assert_eq!(notif.agent, CLIAgent::Codex);
+    assert_eq!(notif.event, CLIAgentEventType::Stop);
+}
+
+#[test]
+fn parse_codex_permission_request_notification() {
+    let body = r#"{"v":1,"agent":"codex","event":"permission_request","summary":"Codex is waiting for approval"}"#;
+    let notif = parse_event(Some("warp://cli-agent"), body).unwrap();
+
+    assert_eq!(notif.agent, CLIAgent::Codex);
+    assert_eq!(notif.event, CLIAgentEventType::PermissionRequest);
+    assert_eq!(
+        notif.payload.summary.as_deref(),
+        Some("Codex is waiting for approval")
+    );
+}
+
+#[test]
+fn parse_codex_permission_replied_notification() {
+    let body = r#"{"v":1,"agent":"codex","event":"permission_replied"}"#;
+    let notif = parse_event(Some("warp://cli-agent"), body).unwrap();
+
+    assert_eq!(notif.agent, CLIAgent::Codex);
+    assert_eq!(notif.event, CLIAgentEventType::PermissionReplied);
+}
+
+#[test]
 fn returns_none_for_wrong_sentinel() {
     let body = r#"{"v":1,"agent":"claude","event":"stop"}"#;
     assert!(parse_event(Some("Claude Code"), body).is_none());
@@ -275,6 +318,194 @@ fn apply_event_preserves_input_session() {
     session.apply_event(&event);
 
     assert_eq!(session.input_state, input_state);
+}
+
+#[test]
+fn idle_session_starts_working_only_after_prompt_submit() {
+    let mut session = CLIAgentSession {
+        agent: CLIAgent::Codex,
+        status: CLIAgentSessionStatus::Idle,
+        session_context: CLIAgentSessionContext::default(),
+        input_state: CLIAgentInputState::Closed,
+        should_auto_toggle_input: false,
+        listener: None,
+        remote_host: None,
+        plugin_version: None,
+        draft_text: None,
+        custom_command_prefix: None,
+    };
+
+    let event = CLIAgentEvent {
+        v: 1,
+        agent: CLIAgent::Codex,
+        event: CLIAgentEventType::PromptSubmit,
+        session_id: None,
+        cwd: None,
+        project: None,
+        payload: CLIAgentEventPayload {
+            query: Some("fix this".to_owned()),
+            ..Default::default()
+        },
+    };
+
+    assert_eq!(
+        session.apply_event(&event),
+        Some(CLIAgentSessionStatus::InProgress)
+    );
+    assert_eq!(session.status, CLIAgentSessionStatus::InProgress);
+    assert_eq!(session.session_context.query.as_deref(), Some("fix this"));
+}
+
+#[test]
+fn stop_finishes_active_session() {
+    let mut session = CLIAgentSession {
+        agent: CLIAgent::Codex,
+        status: CLIAgentSessionStatus::InProgress,
+        session_context: CLIAgentSessionContext::default(),
+        input_state: CLIAgentInputState::Closed,
+        should_auto_toggle_input: false,
+        listener: None,
+        remote_host: None,
+        plugin_version: None,
+        draft_text: None,
+        custom_command_prefix: None,
+    };
+
+    let event = CLIAgentEvent {
+        v: 1,
+        agent: CLIAgent::Codex,
+        event: CLIAgentEventType::Stop,
+        session_id: None,
+        cwd: None,
+        project: None,
+        payload: CLIAgentEventPayload {
+            response: Some("done".to_owned()),
+            ..Default::default()
+        },
+    };
+
+    assert_eq!(
+        session.apply_event(&event),
+        Some(CLIAgentSessionStatus::Success)
+    );
+    assert_eq!(session.status, CLIAgentSessionStatus::Success);
+    assert_eq!(session.session_context.response.as_deref(), Some("done"));
+}
+
+#[test]
+fn session_start_preserves_idle_status() {
+    let mut session = CLIAgentSession {
+        agent: CLIAgent::Claude,
+        status: CLIAgentSessionStatus::Idle,
+        session_context: CLIAgentSessionContext::default(),
+        input_state: CLIAgentInputState::Closed,
+        should_auto_toggle_input: false,
+        listener: None,
+        remote_host: None,
+        plugin_version: None,
+        draft_text: None,
+        custom_command_prefix: None,
+    };
+
+    let event = CLIAgentEvent {
+        v: 1,
+        agent: CLIAgent::Claude,
+        event: CLIAgentEventType::SessionStart,
+        session_id: Some("abc".to_owned()),
+        cwd: None,
+        project: None,
+        payload: CLIAgentEventPayload {
+            plugin_version: Some("2.0.0".to_owned()),
+            ..Default::default()
+        },
+    };
+
+    assert_eq!(session.apply_event(&event), None);
+    assert_eq!(session.status, CLIAgentSessionStatus::Idle);
+    assert_eq!(session.plugin_version.as_deref(), Some("2.0.0"));
+}
+
+#[test]
+fn idle_status_has_no_conversation_status() {
+    assert!(CLIAgentSessionStatus::Idle
+        .to_conversation_status()
+        .is_none());
+}
+
+#[test]
+fn codex_hook_backed_session_has_rich_status_after_structured_event() {
+    assert!(CLIAgentSessionsModel::session_has_rich_status_from_parts(
+        true,
+        CLIAgent::Codex,
+        true,
+    ));
+}
+
+#[test]
+fn codex_legacy_session_without_structured_event_is_not_rich_status() {
+    assert!(!CLIAgentSessionsModel::session_has_rich_status_from_parts(
+        true,
+        CLIAgent::Codex,
+        false,
+    ));
+}
+
+#[test]
+fn command_detected_session_without_listener_is_not_rich_status() {
+    assert!(!CLIAgentSessionsModel::session_has_rich_status_from_parts(
+        false,
+        CLIAgent::Claude,
+        true,
+    ));
+}
+
+#[test]
+fn codex_permission_request_blocks_until_pre_tool_resume_event() {
+    let mut session = CLIAgentSession {
+        agent: CLIAgent::Codex,
+        status: CLIAgentSessionStatus::InProgress,
+        session_context: CLIAgentSessionContext::default(),
+        input_state: CLIAgentInputState::Closed,
+        should_auto_toggle_input: false,
+        listener: None,
+        remote_host: None,
+        plugin_version: None,
+        draft_text: None,
+        custom_command_prefix: None,
+    };
+
+    let permission_request = CLIAgentEvent {
+        v: 1,
+        agent: CLIAgent::Codex,
+        event: CLIAgentEventType::PermissionRequest,
+        session_id: None,
+        cwd: None,
+        project: None,
+        payload: CLIAgentEventPayload {
+            summary: Some("Codex is waiting for approval".to_owned()),
+            ..Default::default()
+        },
+    };
+    let permission_replied = CLIAgentEvent {
+        v: 1,
+        agent: CLIAgent::Codex,
+        event: CLIAgentEventType::PermissionReplied,
+        session_id: None,
+        cwd: None,
+        project: None,
+        payload: CLIAgentEventPayload::default(),
+    };
+
+    assert_eq!(
+        session.apply_event(&permission_request),
+        Some(CLIAgentSessionStatus::Blocked {
+            message: Some("Codex is waiting for approval".to_owned())
+        })
+    );
+    assert_eq!(
+        session.apply_event(&permission_replied),
+        Some(CLIAgentSessionStatus::InProgress)
+    );
 }
 
 #[test]

@@ -8,8 +8,8 @@ pub mod listener;
 pub(crate) mod plugin_manager;
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
+use instant::Instant;
 use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use crate::ai::blocklist::InputConfig;
@@ -21,20 +21,27 @@ use event::{CLIAgentEvent, CLIAgentEventType};
 /// Status of a tracked CLI agent session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CLIAgentSessionStatus {
+    /// The CLI agent process is open, but no active turn is currently known.
+    Idle,
     InProgress,
     Success,
-    Blocked { message: Option<String> },
+    Blocked {
+        message: Option<String>,
+    },
 }
 
 impl CLIAgentSessionStatus {
-    pub fn to_conversation_status(&self) -> crate::ai::agent::conversation::ConversationStatus {
+    pub fn to_conversation_status(
+        &self,
+    ) -> Option<crate::ai::agent::conversation::ConversationStatus> {
         use crate::ai::agent::conversation::ConversationStatus;
         match self {
-            CLIAgentSessionStatus::InProgress => ConversationStatus::InProgress,
-            CLIAgentSessionStatus::Success => ConversationStatus::Success,
-            CLIAgentSessionStatus::Blocked { message } => ConversationStatus::Blocked {
+            CLIAgentSessionStatus::Idle => None,
+            CLIAgentSessionStatus::InProgress => Some(ConversationStatus::InProgress),
+            CLIAgentSessionStatus::Success => Some(ConversationStatus::Success),
+            CLIAgentSessionStatus::Blocked { message } => Some(ConversationStatus::Blocked {
                 blocked_action: message.clone().unwrap_or_default(),
-            },
+            }),
         }
     }
 }
@@ -289,6 +296,9 @@ impl CLIAgentSessionsModelEvent {
 /// Singleton model that tracks pane-scoped CLI agent state and plugin-enriched session context.
 pub struct CLIAgentSessionsModel {
     sessions: HashMap<EntityId, CLIAgentSession>,
+    /// Sessions that have emitted at least one structured status event. This lets Codex
+    /// upgrade from legacy OSC 9 notifications to reliable hook-backed status per pane.
+    rich_status_sessions: HashSet<EntityId>,
     /// Wall-clock-free timestamp of the last event that transitioned a session
     /// to `InProgress`. Used by UI consumers (e.g. workspace activity
     /// indicators) to bound stuck `InProgress` states for agents that lack a
@@ -309,6 +319,7 @@ impl CLIAgentSessionsModel {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            rich_status_sessions: HashSet::new(),
             last_active_event_at: HashMap::new(),
             plugin_auto_failures: HashSet::new(),
         }
@@ -316,6 +327,30 @@ impl CLIAgentSessionsModel {
 
     pub fn session(&self, terminal_view_id: EntityId) -> Option<&CLIAgentSession> {
         self.sessions.get(&terminal_view_id)
+    }
+
+    /// Returns whether this session can be trusted for fine-grained activity status.
+    ///
+    /// Most plugin-backed agents have a statically rich listener. Codex is mixed: older
+    /// setups only emit OSC 9 text notifications, while hook-backed setups emit structured
+    /// Warp events. The latter become rich after the first structured event is observed.
+    pub fn session_has_rich_status(&self, terminal_view_id: EntityId) -> bool {
+        self.sessions.get(&terminal_view_id).is_some_and(|session| {
+            Self::session_has_rich_status_from_parts(
+                session.listener.is_some(),
+                session.agent,
+                self.rich_status_sessions.contains(&terminal_view_id),
+            )
+        })
+    }
+
+    fn session_has_rich_status_from_parts(
+        has_listener: bool,
+        agent: CLIAgent,
+        has_structured_status_event: bool,
+    ) -> bool {
+        has_listener
+            && (listener::agent_supports_rich_status(&agent) || has_structured_status_event)
     }
 
     /// Returns the timestamp of the last event that drove this session into
@@ -369,7 +404,6 @@ impl CLIAgentSessionsModel {
             .filter(|s| s.agent == agent)
         {
             // Upgrade existing session with plugin context.
-            session.status = CLIAgentSessionStatus::InProgress;
             session.listener = Some(listener);
             session.plugin_version = plugin_version;
             session.remote_host = remote_host;
@@ -385,7 +419,7 @@ impl CLIAgentSessionsModel {
             terminal_view_id,
             CLIAgentSession {
                 agent,
-                status: CLIAgentSessionStatus::InProgress,
+                status: CLIAgentSessionStatus::Idle,
                 session_context: CLIAgentSessionContext {
                     cwd,
                     project,
@@ -405,6 +439,7 @@ impl CLIAgentSessionsModel {
     }
 
     pub fn remove_session(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
+        self.rich_status_sessions.remove(&terminal_view_id);
         self.last_active_event_at.remove(&terminal_view_id);
         if let Some(session) = self.sessions.remove(&terminal_view_id) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
@@ -421,9 +456,25 @@ impl CLIAgentSessionsModel {
         event: &CLIAgentEvent,
         ctx: &mut ModelContext<Self>,
     ) {
+        self.update_from_event_with_status_source(terminal_view_id, event, false, ctx);
+    }
+
+    /// Updates the session's status and context from a parsed CLI agent event and records whether
+    /// the event came from a structured source that can be trusted for rich status.
+    pub fn update_from_event_with_status_source(
+        &mut self,
+        terminal_view_id: EntityId,
+        event: &CLIAgentEvent,
+        provides_rich_status: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
         let Some(session) = self.sessions.get_mut(&terminal_view_id) else {
             return;
         };
+
+        if provides_rich_status {
+            self.rich_status_sessions.insert(terminal_view_id);
+        }
 
         let event_type = &event.event;
         if let Some(new_status) = session.apply_event(event) {
@@ -431,6 +482,8 @@ impl CLIAgentSessionsModel {
             if matches!(new_status, CLIAgentSessionStatus::InProgress) {
                 self.last_active_event_at
                     .insert(terminal_view_id, Instant::now());
+            } else {
+                self.last_active_event_at.remove(&terminal_view_id);
             }
             ctx.emit(CLIAgentSessionsModelEvent::StatusChanged {
                 terminal_view_id,
@@ -517,6 +570,7 @@ impl CLIAgentSessionsModel {
         // Close any open rich input before replacing, so subscribers can
         // restore input config before the session ends.
         self.close_input(terminal_view_id, false, ctx);
+        self.rich_status_sessions.remove(&terminal_view_id);
         if starts_in_progress {
             self.last_active_event_at
                 .insert(terminal_view_id, Instant::now());

@@ -19,7 +19,6 @@ use crate::terminal::cli_agent_sessions::codex_rate_limits::{
     CodexRateLimitProjection, CodexRateLimitUsage, CodexRateLimitUsageModel,
     CodexRateLimitWindowKind, CodexRateLimitWindowUsage,
 };
-use crate::terminal::cli_agent_sessions::listener::agent_supports_rich_status;
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionStatus, CLIAgentSessionsModel};
 use crate::terminal::{CLIAgent, TerminalView};
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
@@ -28,8 +27,9 @@ use crate::workspace::{Workspace, WorkspaceAction};
 use crate::BlocklistAIHistoryModel;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 use chrono::{DateTime, Local, Utc};
+use instant::Instant;
 use pathfinder_geometry::vector::vec2f;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use ui_components::tooltip::{Params as TooltipParams, Tooltip as TooltipComponent};
 use ui_components::{Component as _, Options as ComponentOptions};
 use warp_core::ui::color::coloru_with_opacity;
@@ -69,6 +69,8 @@ const WORKSPACE_ACTIVITY_ANIMATION_FRAMES: [Icon; WORKSPACE_ACTIVITY_ANIMATION_F
 const COUNT_SLOT_WIDTH: f32 = 24.;
 const NOTIFICATION_SLOT_WIDTH: f32 = 18.;
 const CLOSE_SLOT_WIDTH: f32 = 22.;
+const CODEX_VISIBLE_STATUS_SCAN_LINES: usize = 12;
+const TERMINAL_VISIBLE_STATUS_SCAN_LINES: usize = 24;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 const RESOURCE_GRAPH_BAR_COUNT: usize = 72;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
@@ -1262,7 +1264,7 @@ impl Workspace {
                     (
                         terminal_view_id,
                         &session.status,
-                        session.listener.is_some() && agent_supports_rich_status(&session.agent),
+                        cli_sessions.session_has_rich_status(terminal_view_id),
                         self.workspace_terminal_view_is_running_cli_agent(
                             terminal_view_id,
                             session.agent,
@@ -1340,19 +1342,33 @@ impl Workspace {
         app: &AppContext,
     ) -> Option<AgentActivity> {
         let cli_sessions = CLIAgentSessionsModel::as_ref(app);
+        let running_cli_agent =
+            terminal_view.detected_cli_agent_for_active_long_running_command(app);
+
         if let Some(session) = cli_sessions.session(terminal_view.id()) {
-            let terminal_is_running_cli_agent = terminal_view
-                .detected_cli_agent_for_active_long_running_command(app)
-                .is_some_and(|agent| agent == session.agent);
+            let terminal_is_running_cli_agent =
+                running_cli_agent.is_some_and(|agent| agent == session.agent);
             if let Some(activity) = Self::cli_agent_session_activity(
                 &session.status,
-                session.listener.is_some() && agent_supports_rich_status(&session.agent),
+                cli_sessions.session_has_rich_status(terminal_view.id()),
                 terminal_is_running_cli_agent,
                 cli_sessions.last_active_event_at(terminal_view.id()),
                 NonRichAgentActivityPolicy::TrustRunningTerminalCommand,
             ) {
                 return Some(activity);
             }
+
+            if session.agent == CLIAgent::Codex
+                && !cli_sessions.session_has_rich_status(terminal_view.id())
+                && terminal_is_running_cli_agent
+                && Self::terminal_visible_codex_working_status(terminal_view)
+            {
+                return Some(AgentActivity::Working);
+            }
+        } else if running_cli_agent == Some(CLIAgent::Codex)
+            && Self::terminal_visible_codex_working_status(terminal_view)
+        {
+            return Some(AgentActivity::Working);
         }
 
         if let Some(conversation) =
@@ -1372,8 +1388,37 @@ impl Workspace {
             .and_then(Self::conversation_status_activity)
     }
 
+    fn terminal_visible_output(terminal_view: &TerminalView) -> String {
+        let model = terminal_view.model.lock();
+        if model.is_alt_screen_active() {
+            model.alt_screen().output_to_string()
+        } else {
+            model
+                .block_list()
+                .active_block()
+                .output_grid()
+                .contents_to_string(false, Some(TERMINAL_VISIBLE_STATUS_SCAN_LINES))
+        }
+    }
+
+    fn terminal_visible_codex_working_status(terminal_view: &TerminalView) -> bool {
+        Self::codex_output_has_visible_working_status(&Self::terminal_visible_output(terminal_view))
+    }
+
+    fn codex_output_has_visible_working_status(output: &str) -> bool {
+        output
+            .lines()
+            .rev()
+            .take(CODEX_VISIBLE_STATUS_SCAN_LINES)
+            .any(|line| {
+                let line = line.trim();
+                line.contains("Working (") && line.contains("esc to interrupt")
+            })
+    }
+
     fn cli_agent_activity_from_status(status: &CLIAgentSessionStatus) -> Option<AgentActivity> {
         match status {
+            CLIAgentSessionStatus::Idle => None,
             CLIAgentSessionStatus::InProgress => Some(AgentActivity::Working),
             CLIAgentSessionStatus::Blocked { .. } => Some(AgentActivity::Waiting),
             CLIAgentSessionStatus::Success => None,
@@ -1606,6 +1651,7 @@ mod tests {
         let working_terminal = EntityId::new();
         let blocked_terminal = EntityId::new();
         let success_terminal = EntityId::new();
+        let idle_terminal = EntityId::new();
         let cli_sessions = [
             (
                 working_terminal,
@@ -1627,6 +1673,7 @@ mod tests {
                 true,
                 false,
             ),
+            (idle_terminal, CLIAgentSessionStatus::Idle, true, false),
         ];
 
         let stats = Workspace::workspace_agent_summary_stats_from_sources(
@@ -1648,6 +1695,32 @@ mod tests {
 
         assert_eq!(stats.working, 1);
         assert_eq!(stats.waiting, 1);
+    }
+
+    #[test]
+    fn workspace_agent_summary_stats_ignores_idle_sessions() {
+        let terminal_view_id = EntityId::new();
+        let cli_sessions = [(terminal_view_id, CLIAgentSessionStatus::Idle, true, true)];
+
+        let stats = Workspace::workspace_agent_summary_stats_from_sources(
+            cli_sessions.iter().map(
+                |(terminal_view_id, status, has_rich_status, terminal_is_long_running)| {
+                    (
+                        *terminal_view_id,
+                        status,
+                        *has_rich_status,
+                        *terminal_is_long_running,
+                        Some(Instant::now()),
+                    )
+                },
+            ),
+            |_| None,
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(stats.working, 0);
+        assert_eq!(stats.waiting, 0);
     }
 
     #[test]
@@ -1812,6 +1885,50 @@ mod tests {
             ),
             None
         );
+        assert_eq!(
+            Workspace::cli_agent_session_activity(
+                &CLIAgentSessionStatus::Idle,
+                false,
+                true,
+                Some(Instant::now()),
+                NonRichAgentActivityPolicy::TrustRunningTerminalCommand,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_visible_working_status_detects_active_turn() {
+        let output = "\
+>_ OpenAI Codex
+
+> do a security code review for backend
+
+Working (8s - esc to interrupt)
+
+> Use /skills to list available skills";
+
+        assert!(Workspace::codex_output_has_visible_working_status(output));
+    }
+
+    #[test]
+    fn codex_visible_working_status_ignores_stale_tail_output() {
+        let output = format!(
+            "Working (8s - esc to interrupt)\n{}",
+            (0..CODEX_VISIBLE_STATUS_SCAN_LINES + 1)
+                .map(|i| format!("old transcript line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        assert!(!Workspace::codex_output_has_visible_working_status(&output));
+    }
+
+    #[test]
+    fn codex_visible_working_status_requires_interrupt_hint() {
+        let output = "Summary: Working (8s) on the previous task";
+
+        assert!(!Workspace::codex_output_has_visible_working_status(output));
     }
 
     #[test]

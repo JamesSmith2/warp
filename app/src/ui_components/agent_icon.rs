@@ -14,7 +14,6 @@ use warpui::SingletonEntity;
 
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent_conversations_model::ConversationOrTask;
-use crate::terminal::cli_agent_sessions::listener::agent_supports_rich_status;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::view::TerminalView;
 use crate::terminal::CLIAgent;
@@ -34,14 +33,15 @@ pub(crate) fn terminal_view_agent_icon_variant(
     terminal_view: &TerminalView,
     app: &AppContext,
 ) -> Option<IconWithStatusVariant> {
-    let cli_agent_session = CLIAgentSessionsModel::as_ref(app).session(terminal_view.id());
+    let cli_agent_sessions = CLIAgentSessionsModel::as_ref(app);
+    let cli_agent_session = cli_agent_sessions.session(terminal_view.id());
     let inputs = TerminalIconInputs {
         is_ambient: terminal_view.is_ambient_agent_session(app),
         cli_session: cli_agent_session.map(|session| CLISessionInputs {
             agent: session.agent,
             has_listener: session.listener.is_some(),
             status: session.status.to_conversation_status(),
-            supports_rich_status: agent_supports_rich_status(&session.agent),
+            supports_rich_status: cli_agent_sessions.session_has_rich_status(terminal_view.id()),
         }),
         ambient_selected_third_party_cli_agent: terminal_view
             .ambient_agent_view_model()
@@ -95,7 +95,7 @@ struct CLISessionInputs {
     /// Whether the session is backed by a plugin listener. Plugin-backed sessions report
     /// rich status; command-detected sessions only know that an agent is running.
     has_listener: bool,
-    status: ConversationStatus,
+    status: Option<ConversationStatus>,
     /// Whether the agent's session handler exposes rich status (plugin-backed handlers report
     /// rich status; Codex's OSC 9 handler does not).
     supports_rich_status: bool,
@@ -113,8 +113,9 @@ fn agent_icon_variant_from_terminal_inputs(
         .as_ref()
         .filter(|s| !matches!(s.agent, CLIAgent::Unknown))
     {
-        let status =
-            (session.has_listener && session.supports_rich_status).then(|| session.status.clone());
+        let status = (session.has_listener && session.supports_rich_status)
+            .then(|| session.status.clone())
+            .flatten();
         return Some(IconWithStatusVariant::CLIAgent {
             agent: session.agent,
             status,

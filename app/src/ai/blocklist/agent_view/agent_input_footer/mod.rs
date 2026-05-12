@@ -31,8 +31,7 @@ use crate::{
     settings_view::SettingsSection,
     terminal::{
         cli_agent_sessions::{
-            listener::agent_supports_rich_status, CLIAgentInputState, CLIAgentSessionsModel,
-            CLIAgentSessionsModelEvent,
+            CLIAgentInputState, CLIAgentSessionsModel, CLIAgentSessionsModelEvent,
         },
         input::{models::InlineModelSelectorTab, MenuPositioningProvider},
         model_events::ModelEvent,
@@ -476,10 +475,7 @@ impl AgentInputFooter {
                 // When a listener connects for an agent with rich status,
                 // the plugin is verified installed — hide the chip.
                 // (Codex always has a listener but no actual plugin to install.)
-                if CLIAgentSessionsModel::as_ref(ctx)
-                    .session(me.terminal_view_id)
-                    .is_some_and(|s| s.listener.is_some() && agent_supports_rich_status(&s.agent))
-                {
+                if CLIAgentSessionsModel::as_ref(ctx).session_has_rich_status(me.terminal_view_id) {
                     me.plugin_chip_ready = false;
                 }
 
@@ -498,11 +494,7 @@ impl AgentInputFooter {
                                     Timer::after(PLUGIN_CHIP_DEBOUNCE),
                                     |me, _, ctx: &mut ViewContext<Self>| {
                                         let suppress = CLIAgentSessionsModel::as_ref(ctx)
-                                            .session(me.terminal_view_id)
-                                            .is_some_and(|s| {
-                                                s.listener.is_some()
-                                                    && agent_supports_rich_status(&s.agent)
-                                            });
+                                            .session_has_rich_status(me.terminal_view_id);
                                         if !suppress {
                                             me.plugin_chip_ready = true;
                                             ctx.notify();
